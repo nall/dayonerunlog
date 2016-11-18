@@ -208,6 +208,8 @@ def sr_get_runs(smashrun, start, numdays, userinfo, badges):
     else:
         start = datetime.strptime(start, '%Y-%m-%d')
     start = start.replace(tzinfo=to_zone)
+    delta = start - start.replace(tzinfo=from_zone)
+    buggy_start = start - delta
 
     stop = date.fromordinal(start.toordinal()+numdays)
     tomorrow = date.fromordinal(date.today().toordinal()+1)
@@ -220,7 +222,7 @@ def sr_get_runs(smashrun, start, numdays, userinfo, badges):
     logging.info("                STOP: %s" % (stop))
 
     activities = []
-    for r in smashrun.get_activities(since=start):
+    for r in smashrun.get_activities(since=buggy_start):
         # 2016-11-17T07:11:00-08:00
         dt = r['startDateTimeLocal'][:-6]
         tz = r['startDateTimeLocal'][-6:]
