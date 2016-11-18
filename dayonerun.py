@@ -11,6 +11,7 @@ import requests
 import subprocess
 import sys
 import tempfile
+import yaml
 
 from smashrun.client import Smashrun
 from datetime import date
@@ -22,6 +23,7 @@ UNITS = UnitRegistry()
 
 def parse_args(argv):
     parser = argparse.ArgumentParser()
+    parser.add_argument('--credentials_file', type=str, help='The name of the file holding service credentials')
     parser.add_argument('--journal', type=str, help='The name of the DayOne journal to use')
     parser.add_argument('--start', type=str, help='An initial start date of the form DD/MM/YYYY')
     parser.add_argument('--days', default=1, type=int, help='Number of days since start to process')
@@ -30,6 +32,10 @@ def parse_args(argv):
     parser.add_argument('--dryrun', action='store_true', help='Do not create journal entries. Just print the CLI commands to do so')
     parser.add_argument('--debug', action='store_true', help='Enable verbose debug')
     args = parser.parse_args()
+
+    with open(args.credentials_file, 'r') as fh:
+        setattr(args, 'credentials', yaml.load(fh))
+
     return args
 
 def setup(argv):
@@ -337,7 +343,7 @@ def cleanup_runs(runs):
     #        os.unlink(photo)
 
 def main(args):
-    smashrun = smashrun_client(**SMASHRUN_CREDS)
+    smashrun = smashrun_client(**args.credentials['smashrun'])
     userinfo = sr_get_userinfo(smashrun)
     badges = sr_get_badges(smashrun)
     runs = sr_get_runs(smashrun, args.start, args.days, userinfo, badges)
