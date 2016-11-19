@@ -57,16 +57,31 @@ Details on how to obtain access tokens is left as an exerecise to the reader at 
 Once you have your credentials setup, you may want to create a separate journal in Day One for importing. Do that before running the script the first time and take note of the journal's name. For examples below, I'll use the journal named `Running`.
 
 ## Default times
-By default, dayonerun.py will try to load all runs in the past day. You can modify this behavior with the `--start` and `--days` options.
+By default, dayonerun.py will try to load all runs in the past day. You can modify this behavior with the `--start`, `--stop`, and `--days` options.
 
-    dayonerun.py --journal Running  --credentials_file credentials --no_coordinates
+    dayonerunlog.py --journal Running  --credentials_file credentials --no_coordinates
 
 Note the `--no_coordinates` above. This is currently required to workaround a bug in DayOne where longitudes starting with `-` generate an error. It can be removed when that bug is fixed.
 
 ## Grab data further back in time
 To get 3 days worth of data starting from Oct 25, 2016 you can do this:
 
-    dayonerun.py --journal Running --credentials_file credentials --no_coordinates --start 2016-10-25 --days 3
+    dayonerunlog.py --journal Running --credentials_file credentials --start 2016-10-25 --days 3
+
+or
+
+    dayonerunlog.py --journal Running --credentials_file credentials --start 2016-10-25 --stop 2016-10-28
+    
+## Using a state file
+Rather than give explicit dates, you can use a state file to keep track of the last time dayonerunlog ran. This is useful if you run a cronjob and just want all the results since you last ran the script.
+
+To create a state file:
+
+    dayonerunlog.py --journal Running --credentials_file credentials --start 2016-10-25 --stop 2016-10-28 --state_file my_statefile --create_state_file
+    
+On subsequent invocations, you can use the following invocation. The results will be queried from the previous invocation time until the current time. Further, the state file will be updated to reflect the new update time.
+
+    dayonerunlog.py --journal Running --credentials_file credentials --state_file my_statefile
 
 # Advanced options
 If you open the script, there are a few options you can tweak. These are described below.
