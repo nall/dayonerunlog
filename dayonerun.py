@@ -3,6 +3,7 @@
 
 # FIXME: Remove get_activity_photos workarounds if stravalib gets fixed
 # FIXME: Remove buggy_start workaroungs if smashrun-client gets fixed
+# FIXME: Bug when there are two runs on the same day a badge is required -- I think both will get it
 
 import argparse
 import dateutil
@@ -131,6 +132,7 @@ def st_get_runs(strava, start, numdays):
     if start is None:
         # Use yesterday
         start = date.fromordinal(date.today().toordinal()-1)
+        start = datetime.combine(start, datetime.min.time())
     else:
         start = datetime.strptime(start, '%Y-%m-%d')
     start = start.replace(tzinfo=to_zone)
@@ -185,6 +187,7 @@ def st_append_strava_info(strava, sr_run, st_runs, args, google_maps_apikey=None
     logging.info("Found Strava activity %s that matches SmashRun activity %s" % (st_run['id'], sr_run['__id']))
 
     sr_run['__tags'].append('strava')
+    sr_run['__activity_urls']['strava'] = 'https://www.strava.com/activities/%s' % (st_run['id'])
 
     # Add Strava route from polyline
     polyline = None
@@ -361,6 +364,7 @@ def sr_get_runs(smashrun, start, numdays, userinfo, badges):
     if start is None:
         # Use yesterday
         start = date.fromordinal(date.today().toordinal()-1)
+        start = datetime.combine(start, datetime.min.time())
     else:
         start = datetime.strptime(start, '%Y-%m-%d')
     start = start.replace(tzinfo=to_zone)
