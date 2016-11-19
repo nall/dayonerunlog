@@ -182,10 +182,11 @@ def st_find_strava_run(sr_run, st_runs):
 def st_append_strava_info(strava, sr_run, st_runs, args, google_maps_apikey=None):
     st_run = st_find_strava_run(sr_run, st_runs)
     if st_run is None:
-        logging.warning("Found no Strava run corresponding to SmashRun activity %s" % (sr_run['__id']))
+        logging.warning("Found no Strava run corresponding to SmashRun activity %s" % (sr_run['__id']['smashrun']))
         return
-    logging.info("Found Strava activity %s that matches SmashRun activity %s" % (st_run['id'], sr_run['__id']))
+    logging.info("Found Strava activity %s that matches SmashRun activity %s" % (st_run['id'], sr_run['__id']['smashrun']))
 
+    sr_run['__id']['strava'] = st_run['id']
     sr_run['__tags'].append('strava')
     sr_run['__activity_urls']['strava'] = 'https://www.strava.com/activities/%s' % (st_run['id'])
 
@@ -408,9 +409,9 @@ def sr_get_runs(smashrun, start, numdays, userinfo, badges):
         details = smashrun.get_activity(activity['activityId'])
         logging.debug("SMASHRUN_ACTIVITY(%s)=%s" % (activity['activityId'], pprint.pformat(details)))
         splits = sr_get_split_info(details)
-        activity['__id'] = activity['activityId']
+        activity['__id'] = {'smashrun': activity['activityId']}
         activity['__activity_urls'] = {'smashrun': 'http://smashrun.com/%s/run/%s' % (userinfo['userName'],
-                                                                                      activity['__id'])}
+                                                                                      activity['activityId'])}
         activity['__title'] = activity_title
         activity['__notes'] = activity['notes'] + "\n"
         activity['__localtime'] = localtime
@@ -484,11 +485,14 @@ def create_journal_entry(args, run):
             entry_text += '   * **%s**: %s\n' % (badge['name'], badge['requirement'])
         entry_text += '\n'
     entry_text += '# Misc\n'
-    entry_text += '   * Activity ID `%s`\n' % (run['__id'])
-
     service_map = {'smashrun': 'SmashRun', 'strava': 'Strava'}
+
     for service, url in run['__activity_urls'].iteritems():
-        entry_text += '   * [%s Link](%s)\n' % (service_map[service], url)
+        ident = ''
+        if service in run['__id']:
+            ident = ' ID: `%s`' % (run['__id'][service])
+
+        entry_text += '   * [%s Link](%s)%s\n' % (service_map[service], url, ident)
 
     if args.dryrun:
         logging.info("Entry text:\n" + entry_text)
