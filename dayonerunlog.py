@@ -58,22 +58,38 @@ UNITS = UnitRegistry()
 START_TIME_THRESHOLD_IN_SECS = 90
 DISTANCE_THRESHOLD_IN_METERS = 150
 STRAVA_PHOTO_SIZE = 1000
+STATE_FILE_PREFIX = 'LastUpdateStop: '
+STATE_FILE_TIME_FORMAT = '%Y-%m-%dT%H:%M:%S'  # this is in local time
 
 
 def parse_args(argv):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--credentials_file', type=str, help='The name of the file holding service credentials')
-    parser.add_argument('--journal', type=str, help='The name of the DayOne journal to use')
-    parser.add_argument('--start', type=str, help='An initial start date of the form DD/MM/YYYY')
-    parser.add_argument('--days', default=1, type=int, help='Number of days since start to process')
-    parser.add_argument('--tag', dest='tags', default=[], type=str, action='append', help='Number of days since start to process')    # noqa
-    parser.add_argument('--no_coordinates', action='store_true', help='Do not attempt to set coordinates for the entry')
-    parser.add_argument('--no_strava', action='store_true', help='Do not query Strava for photos or run routes')
-    parser.add_argument('--no_badges', action='store_true', help='Do not query SmasRun for badges')
-    parser.add_argument('--no_route', action='store_true', help='Do not query SmasRun for badges')
-    parser.add_argument('--dryrun', action='store_true', help='Do not create journal entries. Just print the CLI commands to do so')  # noqa
-    parser.add_argument('--debug', action='store_true', help='Enable verbose debug')
+    parser.add_argument('--credentials_file', type=str, required=True, help='The name of the file holding service credentials')
+    parser.add_argument('--journal',          type=str,                help='The name of the DayOne journal to use')
+    parser.add_argument('--start',            type=str,                help='An initial start date of the form YYYY-MM-DD[THH:MM:SS]')
+    parser.add_argument('--stop',             type=str,                help='An end date of the form YYYY-MM-DD[THH:MM:SS]')
+    parser.add_argument('--days',             type=int,                help='Number of days since start to process')
+    parser.add_argument('--tag', dest='tags', type=str, default=[],    action='append', help='Number of days since start to process')    # noqa
+    parser.add_argument('--state_file',       type=str,                help='Request all runs since state file\'s modification time and update time afterwards')  # noqa
+    parser.add_argument('--create_state_file', action='store_true', help='Create a state file based on this invocation')
+    parser.add_argument('--no_coordinates',    action='store_true', help='Do not attempt to set coordinates for the entry')
+    parser.add_argument('--no_strava',         action='store_true', help='Do not query Strava for photos or run routes')
+    parser.add_argument('--no_badges',         action='store_true', help='Do not query SmasRun for badges')
+    parser.add_argument('--no_route',          action='store_true', help='Do not query SmasRun for badges')
+    parser.add_argument('--dryrun',            action='store_true', help='Do not create journal entries. Just print the CLI commands to do so')  # noqa
+    parser.add_argument('--debug',             action='store_true', help='Enable verbose debug')
     args = parser.parse_args()
+
+    if not os.path.isfile(args.credentials_file):
+        parser.error('No such credentials file: %s' % (args.credentials_file))
+    if args.state_file and not os.path.isfile(args.state_file):
+        parser.error('No such state file: %s' % (args.state_file))
+    if args.state_file and args.start and not args.create_state_file:
+        parser.error("Must specify at most one of --start and --state_file")
+    if args.state_file and args.days and not args.create_state_file:
+        parser.error("Must specify at most one of --state_file and --days")
+    if args.stop and args.days:
+        parser.error("Must specify at most one of --stop and --days")
 
     with open(args.credentials_file, 'r') as fh:
         setattr(args, 'credentials', yaml.load(fh))
@@ -92,6 +108,40 @@ def setup(argv):
     formatter = logging.Formatter('%(levelname)-8s %(message)s')
     console.setFormatter(formatter)
     logging.getLogger('').addHandler(console)
+
+    to_zone = dateutil.tz.tzlocal()
+
+    if args.start is None:
+        if args.state_file and not args.create_state_file:
+            tstamp = None
+            with open(args.state_file, 'r') as fh:
+                for line in fh.readlines():
+                    if line.startswith(STATE_FILE_PREFIX):
+                        tstamp = line[len(STATE_FILE_PREFIX):].rstrip()
+                        break
+            assert tstamp is not None, "Unable to determine last update time from %s" % (args.state_file)
+            args.start = datetime.strptime(tstamp, STATE_FILE_TIME_FORMAT)
+        else:
+            # Use yesterday
+            args.start = date.fromordinal(date.today().toordinal() - 1)
+            args.start = datetime.combine(args.start, datetime.min.time())
+    else:
+        fmt = '%Y-%m-%dT%H:%M:%S' if args.start.find('T') != -1 else '%Y-%m-%d'
+        args.start = datetime.strptime(args.start, fmt)
+    args.start = args.start.replace(tzinfo=to_zone)
+
+    if args.stop is None:
+        if args.days is None:
+            args.stop = datetime.now()
+        else:
+            args.stop = date.fromordinal(start.toordinal() + args.days)
+            args.stop = datetime.combine(args.stop, datetime.max.time())
+    else:
+        fmt = '%Y-%m-%dT%H:%M:%S' if args.stop.find('T') != -1 else '%Y-%m-%d'
+        args.stop = datetime.strptime(args.stop, fmt)
+
+    args.stop = args.stop.replace(tzinfo=to_zone)
+
     return args
 
 
@@ -154,25 +204,9 @@ def st_get_photos(strava, activity_id):
                                                    result_fetcher=result_fetcher)
 
 
-def st_get_runs(strava, start, numdays):
-    to_zone = dateutil.tz.tzlocal()
-    if start is None:
-        # Use yesterday
-        start = date.fromordinal(date.today().toordinal()-1)
-        start = datetime.combine(start, datetime.min.time())
-    else:
-        start = datetime.strptime(start, '%Y-%m-%d')
-    start = start.replace(tzinfo=to_zone)
-
-    stop = date.fromordinal(start.toordinal()+numdays)
-    tomorrow = date.fromordinal(date.today().toordinal()+1)
-    if stop > tomorrow:
-        logging.warning("Requested stop on %s which is after today. Using end of the day today instead" % (stop))
-        stop = tomorrow
-    stop = datetime.combine(stop, datetime.min.time()).replace(tzinfo=to_zone)
-
+def st_get_runs(strava, start, stop):
     logging.info("Retriving Strava Runs START: %s" % (start))
-    logging.info("                      STOP: %s" % (stop))
+    logging.info("                       STOP: %s" % (stop))
 
     activities = []
     for activity in strava.get_activities(after=start, before=stop):
@@ -385,31 +419,17 @@ def sr_get_badge_photos(activity_id, badges):
     return photos
 
 
-def sr_get_runs(smashrun, start, numdays, userinfo, badges):
+def sr_get_runs(smashrun, start, stop, userinfo, badges):
     from_zone = dateutil.tz.tzutc()
     to_zone = dateutil.tz.tzlocal()
 
-    if start is None:
-        # Use yesterday
-        start = date.fromordinal(date.today().toordinal()-1)
-        start = datetime.combine(start, datetime.min.time())
-    else:
-        start = datetime.strptime(start, '%Y-%m-%d')
-    start = start.replace(tzinfo=to_zone)
-    delta = start - start.replace(tzinfo=from_zone)
-    buggy_start = start - delta
-
-    stop = date.fromordinal(start.toordinal()+numdays)
-    tomorrow = date.fromordinal(date.today().toordinal()+1)
-    if stop > tomorrow:
-        logging.warning("Requested stop on %s which is after today. Using end of the day today instead" % (stop))
-        stop = tomorrow
-    stop = datetime.combine(stop, datetime.min.time()).replace(tzinfo=to_zone)
-
     logging.info("Retriving SmashRuns START: %s" % (start))
-    logging.info("                    STOP: %s" % (stop))
+    logging.info("                     STOP: %s" % (stop))
 
     activities = []
+    # FIXME: If smashrun-client is fixed, can remove this buggy_start stuff
+    delta = start - start.replace(tzinfo=from_zone)
+    buggy_start = start - delta
     for r in smashrun.get_activities(since=buggy_start):
         # 2016-11-17T07:11:00-08:00
         dt = r['startDateTimeLocal'][:-6]
@@ -555,16 +575,23 @@ def main(args):
         badges = []
         if not args.no_badges:
             badges = sr_get_badges(smashrun)
-        sr_runs = sr_get_runs(smashrun, args.start, args.days, userinfo, badges)
+        sr_runs = sr_get_runs(smashrun, args.start, args.stop, userinfo, badges)
 
         if not args.no_strava:
             strava = strava_client(**args.credentials['strava'])
-            st_runs = st_get_runs(strava, args.start, args.days)
+            st_runs = st_get_runs(strava, args.start, args.stop)
 
         for run in sr_runs:
             if not args.no_strava:
                 st_append_strava_info(strava, run, st_runs, args, args.credentials['google_maps_apikey'])
             create_journal_entry(args, run)
+
+        if args.state_file or args.create_state_file:
+            with open(args.state_file, 'w') as fh:
+                fh.write("Command: %s\n" % (' '.join(sys.argv)))
+                fh.write("LastUpdateStart: %s\n" % (args.start.strftime(STATE_FILE_TIME_FORMAT)))
+                fh.write("%s%s\n" % (STATE_FILE_PREFIX, args.stop.strftime(STATE_FILE_TIME_FORMAT)))
+
     finally:
         cleanup_runs(runs)
 
