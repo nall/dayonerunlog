@@ -9,7 +9,7 @@ This is a script to collect running activities from [SmashRun](http://smashrun.c
    * Clickable URLs to the Smashrun and Strava pages for the run
 
 # Screenshot
-![DayOneRunLog Screenshot](http://i.imgur.com/mxsKs07.png)
+![DayOneRunLog Screenshot](http://i.imgur.com/ZXqvu5D.png)
 
 # Requirements
 ## DayOne
