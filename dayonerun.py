@@ -1,25 +1,39 @@
 #!/usr/bin/env python
 # vim: ft=python expandtab softtabstop=0 tabstop=4 shiftwidth=4
+
+# FIXME: Remove get_activity_photos workarounds if stravalib gets fixed
+# FIXME: Remove buggy_start workaroungs if smashrun-client gets fixed
+
 import argparse
-import logging
 import dateutil
+import functools
+import inspect
+import logging
 import pint
 import pprint
 import os
 import re
 import requests
+import stravalib
 import subprocess
 import sys
 import tempfile
+import urllib
 import yaml
 
 from smashrun.client import Smashrun
+from stravalib.client import Client
 from datetime import date
 from datetime import datetime
 from dateutil.tz import tzoffset
 from pint import UnitRegistry
 
+
 UNITS = UnitRegistry()
+START_TIME_THRESHOLD_IN_SECS = 90
+DISTANCE_THRESHOLD_IN_METERS = 150
+STRAVA_PHOTO_SIZE = 1000
+
 
 def parse_args(argv):
     parser = argparse.ArgumentParser()
@@ -29,14 +43,21 @@ def parse_args(argv):
     parser.add_argument('--days', default=1, type=int, help='Number of days since start to process')
     parser.add_argument('--tag', dest='tags', default=[], type=str, action='append', help='Number of days since start to process')
     parser.add_argument('--no_coordinates', action='store_true', help='Do not attempt to set coordinates for the entry')
+    parser.add_argument('--no_strava', action='store_true', help='Do not query Strava for photos or run routes')
+    parser.add_argument('--no_badges', action='store_true', help='Do not query SmasRun for badges')
+    parser.add_argument('--no_route', action='store_true', help='Do not query SmasRun for badges')
     parser.add_argument('--dryrun', action='store_true', help='Do not create journal entries. Just print the CLI commands to do so')
     parser.add_argument('--debug', action='store_true', help='Enable verbose debug')
     args = parser.parse_args()
 
     with open(args.credentials_file, 'r') as fh:
         setattr(args, 'credentials', yaml.load(fh))
+        args.credentials.setdefault('smashrun', None)
+        args.credentials.setdefault('strava', None)
+        args.credentials.setdefault('google_maps_apikey', None)
 
     return args
+
 
 def setup(argv):
     args = parse_args(argv)
@@ -47,6 +68,7 @@ def setup(argv):
     console.setFormatter(formatter)
     logging.getLogger('').addHandler(console)
     return args
+
 
 def time_string(pace):
     SECS_PER_SEC = 1.0
@@ -66,6 +88,120 @@ def time_string(pace):
 
     return s
 
+def download_url(url):
+    r = requests.get(url)
+    if r.status_code == 200:
+        with tempfile.NamedTemporaryFile(prefix='dayonerun_strava_photo_', delete=False) as fh:
+            fh.write(r.content)
+            return fh.name
+    else:
+        log.warning("Unable to download %s: %s" % (url, r.text))
+        return None
+
+def strava_client(client_id=None, client_secret=None, refresh_token=None, access_token=None):
+    client = Client()
+    if access_token is None:
+        authorize_url = client.authorization_url(client_id=client_id, redirect_uri='http://localhost:8282/authorized', scope='view_private,write')
+        logging.info("Go to %s" % (authorize_url))
+        code = raw_input("Code: ")
+        client.access_token = client.exchange_code_for_token(client_id=client_id, client_secret=client_secret, code=code)
+        logging.info("Access Token = %s" % (client.access_token))
+    else:
+        client.access_token = access_token
+
+    return client
+
+def st_get_photos(strava, activity_id):
+    # WORKAROUND until stravalib.get_activity_photos is fixed to include photo_sources
+    result_fetcher = functools.partial(strava.protocol.get,
+                                       '/activities/{id}/photos',
+                                       id=activity_id, photo_sources=True, size=STRAVA_PHOTO_SIZE)
+
+    return stravalib.client.BatchedResultsIterator(entity=stravalib.model.ActivityPhoto,
+                                                   bind_client=strava,
+                                                   result_fetcher=result_fetcher)
+
+def st_get_runs(strava, start, numdays):
+    from_zone = dateutil.tz.tzutc()
+    to_zone = dateutil.tz.tzlocal()
+    if start is None:
+        # Use yesterday
+        start = date.fromordinal(date.today().toordinal()-1)
+    else:
+        start = datetime.strptime(start, '%Y-%m-%d')
+    start = start.replace(tzinfo=to_zone)
+
+    stop = date.fromordinal(start.toordinal()+numdays)
+    tomorrow = date.fromordinal(date.today().toordinal()+1)
+    if stop > tomorrow:
+        logging.warning("Requested stop on %s which is after today. Using end of the day today instead" % (stop))
+        stop = tomorrow
+    stop = datetime.combine(stop, datetime.min.time()).replace(tzinfo=to_zone)
+
+    logging.info("Retriving Strava Runs START: %s" % (start))
+    logging.info("                      STOP: %s" % (stop))
+
+    activities = []
+    for activity in strava.get_activities(after=start, before=stop):
+        raw = strava.protocol.get('/activities/{id}', id=activity.id, include_all_efforts=True)
+        activities.append(raw)
+        logging.debug("STRAVA_ACTIVITY(%s)=%s" % (activity.id, pprint.pformat(raw)))
+    return activities
+
+
+def st_find_strava_run(sr_run, st_runs):
+    from_zone = dateutil.tz.tzutc()
+    to_zone = dateutil.tz.tzlocal()
+
+    for st_run in st_runs:
+        # 2016-11-17T15:59:56Z
+        utc = datetime.strptime(st_run['start_date'], '%Y-%m-%dT%H:%M:%SZ')
+        utc = utc.replace(tzinfo=from_zone)
+        local = utc.astimezone(to_zone)
+        st_time = local
+        st_distance = float(st_run['distance'])
+        sr_time = sr_run['__localtime']
+        sr_distance = float(sr_run['distance'] * 1000.0)
+        logging.debug("STRAVA: %s (%s) %s" % (st_time, local, st_distance))
+        logging.debug("SRUN  : %s (%s) %s" % (sr_time, sr_run['__localtime'], sr_distance))
+        logging.debug("   TIME (%s) (max: %s)" % (abs(st_time - sr_time), START_TIME_THRESHOLD_IN_SECS))
+        logging.debug("   DIST (%s) (max: %s)" % (abs(st_distance - sr_distance), DISTANCE_THRESHOLD_IN_METERS))
+        if abs(st_time - sr_time).total_seconds() < START_TIME_THRESHOLD_IN_SECS:
+            if abs(st_distance - sr_distance) < DISTANCE_THRESHOLD_IN_METERS:
+                return st_run
+
+    return None
+
+def st_append_strava_info(strava, sr_run, st_runs, args, google_maps_apikey=None):
+    st_run = st_find_strava_run(sr_run, st_runs)
+    if st_run is None:
+        logging.warning("Found no Strava run corresponding to SmashRun activity %s" % (sr_run['__id']))
+        return
+    logging.info("Found Strava activity %s that matches SmashRun activity %s" % (st_run['id'], sr_run['__id']))
+
+    sr_run['__tags'].append('strava')
+
+    # Add Strava route from polyline
+    polyline = None
+    if 'map' in st_run and 'polyline' in st_run['map']:
+        polyline = st_run['map']['polyline']
+    if not args.no_route and google_maps_apikey is not None and polyline:
+        poly = urllib.quote(polyline)
+        url = 'https://maps.googleapis.com/maps/api/staticmap?size=640x640&path=weight:6%%7Ccolor:blue%%7Cenc:%s&key=%s' % (poly, google_maps_apikey)
+        fname = download_url(url)
+        if fname is not None:
+            sr_run['__photos'].append(fname)
+
+    # Add any Strava photos
+    logging.info("Getting any photos for %s" % (st_run['id']))
+    for photo in st_get_photos(strava, st_run['id']):
+        logging.debug("PHOTO: %s" % pprint.pformat(photo))
+        logging.debug("        ref : %s" % (photo.ref))
+        logging.debug("        urls: %s" % (pprint.pformat(photo.urls)))
+        fname = download_url(photo.urls[str(STRAVA_PHOTO_SIZE)])
+        if fname is not None:
+            sr_run['__photos'].append(fname)
+
 def smashrun_client(client_id=None, client_secret=None, refresh_token=None, access_token=None):
     if client_id is None:
         raise ValueError("Must specify a valid client_id")
@@ -78,6 +214,7 @@ def smashrun_client(client_id=None, client_secret=None, refresh_token=None, acce
         client = Smashrun(client_id=client_id, client_secret=client_secret)
         client.refresh_token(refresh_token=refresh_token)
         return client
+
 
 def sr_get_split_info(details, split_interval=1.0 * UNITS.mile):
     indices = {}
@@ -127,6 +264,17 @@ def sr_get_split_info(details, split_interval=1.0 * UNITS.mile):
         split['total_pace'] = split['total_time'] / split['total_distance']
 
     return splits
+
+
+def activity_title(run):
+    notes = run['notes']
+    prefix = '::Location='
+    for line in notes.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix):]
+
+    # Otherwise some default
+    return 'SmashRun Activity on %s' % (run['__localtime'])
 
 
 def sr_get_coordinate(details):
@@ -198,6 +346,7 @@ def sr_get_badge_photos(activity_id, badges):
 
     return photos
 
+
 def sr_get_runs(smashrun, start, numdays, userinfo, badges):
     from_zone = dateutil.tz.tzutc()
     to_zone = dateutil.tz.tzlocal()
@@ -218,8 +367,8 @@ def sr_get_runs(smashrun, start, numdays, userinfo, badges):
         stop = tomorrow
     stop = datetime.combine(stop, datetime.min.time()).replace(tzinfo=to_zone)
 
-    logging.info("Retriving runs START: %s" % (start))
-    logging.info("                STOP: %s" % (stop))
+    logging.info("Retriving SmashRuns START: %s" % (start))
+    logging.info("                    STOP: %s" % (stop))
 
     activities = []
     for r in smashrun.get_activities(since=buggy_start):
@@ -246,9 +395,11 @@ def sr_get_runs(smashrun, start, numdays, userinfo, badges):
 
         logging.info("Adding %s from %s" % (activity['activityType'], localtime))
         details = smashrun.get_activity(activity['activityId'])
+        logging.debug("SMASHRUN_ACTIVITY(%s)=%s" % (activity['activityId'], pprint.pformat(details)))
         splits = sr_get_split_info(details)
         activity['__id'] = activity['activityId']
         activity['__activity_urls'] = {'smashrun': 'http://smashrun.com/%s/run/%s' % (userinfo['userName'], activity['__id'])}
+        activity['__title'] = activity_title
         activity['__notes'] = activity['notes'] + "\n"
         activity['__localtime'] = localtime
         activity['__tags'] = ['smashrun']
@@ -271,6 +422,7 @@ def sr_get_runs(smashrun, start, numdays, userinfo, badges):
 
     return results
 
+
 def gen_split_markdown(splits):
     table = ''
     table += 'Distance | Total Time | Split Time | Split Pace | Total Pace\n'
@@ -283,6 +435,7 @@ def gen_split_markdown(splits):
         table += '%s\n' % (time_string(split['total_pace'].magnitude))
     table += '\n'
     return table
+
 
 def create_journal_entry(args, run):
     split_markdown = gen_split_markdown(run['__splits'])
@@ -310,9 +463,14 @@ def create_journal_entry(args, run):
     logging.info("Invoking: %s" % (' '.join(dayone_args)))
 
     entry_text = ''
-    entry_text += '# Smashrun Activity on %s\n' % (run['__localtime'])
+    entry_text += '# %s\n' % (run['__title'](run))
     entry_text += '# Notes\n%s\n' % (run['__notes'])
     entry_text += '# Splits\n%s\n' % split_markdown
+    if len(run['__badges']) > 0:
+        entry_text += '# Badges\n'
+        for badge in run['__badges']:
+            entry_text += '   * **%s**: %s\n' % (badge['name'], badge['requirement'])
+        entry_text += '\n'
     entry_text += '# Misc\n'
     entry_text += '   * Activity ID `%s`\n' % (run['__id'])
 
@@ -338,22 +496,34 @@ def create_journal_entry(args, run):
     else:
         logging.info("Created journal entry successfully")
 
+
 def cleanup_runs(runs):
     for run in runs:
         for photo in run['__photos']:
             logging.info("Deleting temp photo %s" % (photo))
-    #        os.unlink(photo)
+            os.unlink(photo)
+
 
 def main(args):
-    smashrun = smashrun_client(**args.credentials['smashrun'])
-    userinfo = sr_get_userinfo(smashrun)
-    badges = sr_get_badges(smashrun)
-    runs = sr_get_runs(smashrun, args.start, args.days, userinfo, badges)
+    runs = []
+    try:
+        smashrun = smashrun_client(**args.credentials['smashrun'])
+        userinfo = sr_get_userinfo(smashrun)
+        badges = []
+        if not args.no_badges:
+            badges = sr_get_badges(smashrun)
+        sr_runs = sr_get_runs(smashrun, args.start, args.days, userinfo, badges)
 
-    for run in runs:
-        create_journal_entry(args, run)
+        if not args.no_strava:
+            strava = strava_client(**args.credentials['strava'])
+            st_runs = st_get_runs(strava, args.start, args.days)
 
-    cleanup_runs(runs)
+        for run in sr_runs:
+            if not args.no_strava:
+                st_append_strava_info(strava, run, st_runs, args, args.credentials['google_maps_apikey'])
+            create_journal_entry(args, run)
+    finally:
+        cleanup_runs(runs)
 
     return 0
 
