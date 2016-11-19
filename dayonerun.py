@@ -7,12 +7,9 @@
 import argparse
 import dateutil
 import functools
-import inspect
 import logging
-import pint
 import pprint
 import os
-import re
 import requests
 import stravalib
 import subprocess
@@ -41,12 +38,12 @@ def parse_args(argv):
     parser.add_argument('--journal', type=str, help='The name of the DayOne journal to use')
     parser.add_argument('--start', type=str, help='An initial start date of the form DD/MM/YYYY')
     parser.add_argument('--days', default=1, type=int, help='Number of days since start to process')
-    parser.add_argument('--tag', dest='tags', default=[], type=str, action='append', help='Number of days since start to process')
+    parser.add_argument('--tag', dest='tags', default=[], type=str, action='append', help='Number of days since start to process')    # noqa
     parser.add_argument('--no_coordinates', action='store_true', help='Do not attempt to set coordinates for the entry')
     parser.add_argument('--no_strava', action='store_true', help='Do not query Strava for photos or run routes')
     parser.add_argument('--no_badges', action='store_true', help='Do not query SmasRun for badges')
     parser.add_argument('--no_route', action='store_true', help='Do not query SmasRun for badges')
-    parser.add_argument('--dryrun', action='store_true', help='Do not create journal entries. Just print the CLI commands to do so')
+    parser.add_argument('--dryrun', action='store_true', help='Do not create journal entries. Just print the CLI commands to do so')  # noqa
     parser.add_argument('--debug', action='store_true', help='Enable verbose debug')
     args = parser.parse_args()
 
@@ -61,7 +58,7 @@ def parse_args(argv):
 
 def setup(argv):
     args = parse_args(argv)
-    logging.basicConfig(filename='dayonerun.log',level=logging.DEBUG if args.debug else logging.INFO)
+    logging.basicConfig(filename='dayonerun.log', level=logging.DEBUG if args.debug else logging.INFO)
     console = logging.StreamHandler()
     console.setLevel(logging.DEBUG if args.debug else logging.INFO)
     formatter = logging.Formatter('%(levelname)-8s %(message)s')
@@ -88,6 +85,7 @@ def time_string(pace):
 
     return s
 
+
 def download_url(url):
     r = requests.get(url)
     if r.status_code == 200:
@@ -95,21 +93,27 @@ def download_url(url):
             fh.write(r.content)
             return fh.name
     else:
-        log.warning("Unable to download %s: %s" % (url, r.text))
+        logging.warning("Unable to download %s: %s" % (url, r.text))
         return None
+
 
 def strava_client(client_id=None, client_secret=None, refresh_token=None, access_token=None):
     client = Client()
     if access_token is None:
-        authorize_url = client.authorization_url(client_id=client_id, redirect_uri='http://localhost:8282/authorized', scope='view_private,write')
+        authorize_url = client.authorization_url(client_id=client_id,
+                                                 redirect_uri='http://localhost:8282/authorized',
+                                                 scope='view_private,write')
         logging.info("Go to %s" % (authorize_url))
         code = raw_input("Code: ")
-        client.access_token = client.exchange_code_for_token(client_id=client_id, client_secret=client_secret, code=code)
+        client.access_token = client.exchange_code_for_token(client_id=client_id,
+                                                             client_secret=client_secret,
+                                                             code=code)
         logging.info("Access Token = %s" % (client.access_token))
     else:
         client.access_token = access_token
 
     return client
+
 
 def st_get_photos(strava, activity_id):
     # WORKAROUND until stravalib.get_activity_photos is fixed to include photo_sources
@@ -121,8 +125,8 @@ def st_get_photos(strava, activity_id):
                                                    bind_client=strava,
                                                    result_fetcher=result_fetcher)
 
+
 def st_get_runs(strava, start, numdays):
-    from_zone = dateutil.tz.tzutc()
     to_zone = dateutil.tz.tzlocal()
     if start is None:
         # Use yesterday
@@ -172,6 +176,7 @@ def st_find_strava_run(sr_run, st_runs):
 
     return None
 
+
 def st_append_strava_info(strava, sr_run, st_runs, args, google_maps_apikey=None):
     st_run = st_find_strava_run(sr_run, st_runs)
     if st_run is None:
@@ -187,7 +192,7 @@ def st_append_strava_info(strava, sr_run, st_runs, args, google_maps_apikey=None
         polyline = st_run['map']['polyline']
     if not args.no_route and google_maps_apikey is not None and polyline:
         poly = urllib.quote(polyline)
-        url = 'https://maps.googleapis.com/maps/api/staticmap?size=640x640&path=weight:6%%7Ccolor:blue%%7Cenc:%s&key=%s' % (poly, google_maps_apikey)
+        url = 'https://maps.googleapis.com/maps/api/staticmap?size=640x640&path=weight:6%%7Ccolor:blue%%7Cenc:%s&key=%s' % (poly, google_maps_apikey)  # noqa
         fname = download_url(url)
         if fname is not None:
             sr_run['__photos'].append(fname)
@@ -202,6 +207,7 @@ def st_append_strava_info(strava, sr_run, st_runs, args, google_maps_apikey=None
         if fname is not None:
             sr_run['__photos'].append(fname)
 
+
 def smashrun_client(client_id=None, client_secret=None, refresh_token=None, access_token=None):
     if client_id is None:
         raise ValueError("Must specify a valid client_id")
@@ -209,7 +215,7 @@ def smashrun_client(client_id=None, client_secret=None, refresh_token=None, acce
         raise ValueError("Must specify a valid client_secret")
 
     if refresh_token is None:
-      raise RuntimeError("Must supply a token currently")
+        raise RuntimeError("Must supply a token currently")
     else:
         client = Smashrun(client_id=client_id, client_secret=client_secret)
         client.refresh_token(refresh_token=refresh_token)
@@ -247,7 +253,7 @@ def sr_get_split_info(details, split_interval=1.0 * UNITS.mile):
             prev_distance = splits[-1]['total_distance']
             next_split += split_interval
             last_split = element_idx
-        
+
         element_idx += 1
 
     # Figure out last part of split
@@ -297,6 +303,7 @@ def sr_get_coordinate(details):
 
 def sr_get_userinfo(smashrun):
     return smashrun.get_userinfo()
+
 
 def sr_get_badges(smashrun):
     badges = []
@@ -398,7 +405,8 @@ def sr_get_runs(smashrun, start, numdays, userinfo, badges):
         logging.debug("SMASHRUN_ACTIVITY(%s)=%s" % (activity['activityId'], pprint.pformat(details)))
         splits = sr_get_split_info(details)
         activity['__id'] = activity['activityId']
-        activity['__activity_urls'] = {'smashrun': 'http://smashrun.com/%s/run/%s' % (userinfo['userName'], activity['__id'])}
+        activity['__activity_urls'] = {'smashrun': 'http://smashrun.com/%s/run/%s' % (userinfo['userName'],
+                                                                                      activity['__id'])}
         activity['__title'] = activity_title
         activity['__notes'] = activity['notes'] + "\n"
         activity['__localtime'] = localtime
@@ -408,8 +416,8 @@ def sr_get_runs(smashrun, start, numdays, userinfo, badges):
         activity['__splits'] = splits
         activity['__coordinate'] = sr_get_coordinate(details)
         activity['__badges'] = []
-        min_badge_time =  datetime.combine(localtime, datetime.min.time()).replace(tzinfo=to_zone)
-        max_badge_time =  datetime.combine(localtime, datetime.max.time()).replace(tzinfo=to_zone)
+        min_badge_time = datetime.combine(localtime, datetime.min.time()).replace(tzinfo=to_zone)
+        max_badge_time = datetime.combine(localtime, datetime.max.time()).replace(tzinfo=to_zone)
         for badge, badge_localtime in badges:
             if badge_localtime >= min_badge_time and badge_localtime <= max_badge_time:
                 logging.info("Adding badge %s to run ID %s on %s" % (badge['name'], activity['activityId'], localtime))
@@ -477,7 +485,7 @@ def create_journal_entry(args, run):
     service_map = {'smashrun': 'SmashRun', 'strava': 'Strava'}
     for service, url in run['__activity_urls'].iteritems():
         entry_text += '   * [%s Link](%s)\n' % (service_map[service], url)
-        
+
     if args.dryrun:
         logging.info("Entry text:\n" + entry_text)
         return
