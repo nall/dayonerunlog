@@ -8,6 +8,9 @@ This is a script to collect running activities from [SmashRun](http://smashrun.c
    * A table of your splits, calculated from the Smashrun data
    * Clickable URLs to the Smashrun and Strava pages for the run
 
+# Screenshot
+![DayOneRunLog Screenshot](http://imgur.com/mxsKs07)
+
 # Requirements
 ## DayOne
 This only writes into [Day One](http://dayoneapp.com), so you'll need to have a copy of that on your Mac. It also uses the CLI, so make sure you have the latest version.
