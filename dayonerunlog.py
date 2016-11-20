@@ -102,7 +102,7 @@ def parse_args(argv):
 
 def setup(argv):
     args = parse_args(argv)
-    logging.basicConfig(filename='dayonerun.log', level=logging.DEBUG if args.debug else logging.INFO)
+    logging.basicConfig(filename='dayonerunlog.log', level=logging.DEBUG if args.debug else logging.INFO)
     console = logging.StreamHandler()
     console.setLevel(logging.DEBUG if args.debug else logging.INFO)
     formatter = logging.Formatter('%(levelname)-8s %(message)s')
