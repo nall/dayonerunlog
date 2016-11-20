@@ -71,11 +71,14 @@ To get 3 days worth of data starting from Oct 25, 2016 you can do this:
 # Advanced options
 If you open the script, there are a few options you can tweak. These are described below.
 
-## START\_TIME\_THRESHOLD\_IN\_SECS (Default: 90)
+## CFG\_START\_TIME\_THRESHOLD\_IN\_SECS (Default: 90)
 Used matching SmashRun and Strava runs. Runs are consider to not match unless their the delta between their start times are under this threshold.
 
-## DISTANCE\_THRESHOLD\_IN\_METERS (Default: 150)
+## CFG\_DISTANCE\_THRESHOLD\_IN\_METERS (Default: 150)
 Used matching SmashRun and Strava runs. Runs are consider to not match unless their the delta between their total distances are under this threshold.
 
-## STRAVA\_PHOTO\_SIZE (Default: 1000)
+## CFG\_STRAVA\_PHOTO\_SIZE (Default: 1000)
 The image size for Strava photo requests. This default basically gets you images around 1024x768 in resolution.
+
+## CFG\_ACTIVITY\_TITLE\_FN (Default: `None`)
+This can be set to a Python `callable` object that takes a run object as its only argument. It should return a string to use as the title of the journal entry.

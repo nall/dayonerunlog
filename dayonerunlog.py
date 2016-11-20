@@ -54,10 +54,25 @@ from dateutil.tz import tzoffset
 from pint import UnitRegistry
 
 
+def custom_title(run):
+    notes = run['notes']
+    prefix = '::Location='
+    for line in notes.splitlines():
+        if line.startswith(prefix):
+            title = line[len(prefix):].strip()
+            if title != '':
+                return title
+    return default_title(run)
+
+
+CFG_START_TIME_THRESHOLD_IN_SECS = 90
+CFG_DISTANCE_THRESHOLD_IN_METERS = 150
+CFG_STRAVA_PHOTO_SIZE = 1000
+CFG_ACTIVITY_TITLE_FN = custom_title  # For an example, look at the custom_title def
+
+
+# Generally nothing below this line should be changed
 UNITS = UnitRegistry()
-START_TIME_THRESHOLD_IN_SECS = 90
-DISTANCE_THRESHOLD_IN_METERS = 150
-STRAVA_PHOTO_SIZE = 1000
 STATE_FILE_PREFIX = 'LastUpdateStop: '
 STATE_FILE_TIME_FORMAT = '%Y-%m-%dT%H:%M:%S'  # this is in local time
 
@@ -197,7 +212,7 @@ def st_get_photos(strava, activity_id):
     # WORKAROUND until stravalib.get_activity_photos is fixed to include photo_sources
     result_fetcher = functools.partial(strava.protocol.get,
                                        '/activities/{id}/photos',
-                                       id=activity_id, photo_sources=True, size=STRAVA_PHOTO_SIZE)
+                                       id=activity_id, photo_sources=True, size=CFG_STRAVA_PHOTO_SIZE)
 
     return stravalib.client.BatchedResultsIterator(entity=stravalib.model.ActivityPhoto,
                                                    bind_client=strava,
@@ -231,10 +246,10 @@ def st_find_strava_run(sr_run, st_runs):
         sr_distance = float(sr_run['distance'] * 1000.0)
         logging.debug("STRAVA: %s (%s) %s" % (st_time, local, st_distance))
         logging.debug("SRUN  : %s (%s) %s" % (sr_time, sr_run['__localtime'], sr_distance))
-        logging.debug("   TIME (%s) (max: %s)" % (abs(st_time - sr_time), START_TIME_THRESHOLD_IN_SECS))
-        logging.debug("   DIST (%s) (max: %s)" % (abs(st_distance - sr_distance), DISTANCE_THRESHOLD_IN_METERS))
-        if abs(st_time - sr_time).total_seconds() < START_TIME_THRESHOLD_IN_SECS:
-            if abs(st_distance - sr_distance) < DISTANCE_THRESHOLD_IN_METERS:
+        logging.debug("   TIME (%s) (max: %s)" % (abs(st_time - sr_time), CFG_START_TIME_THRESHOLD_IN_SECS))
+        logging.debug("   DIST (%s) (max: %s)" % (abs(st_distance - sr_distance), CFG_DISTANCE_THRESHOLD_IN_METERS))
+        if abs(st_time - sr_time).total_seconds() < CFG_START_TIME_THRESHOLD_IN_SECS:
+            if abs(st_distance - sr_distance) < CFG_DISTANCE_THRESHOLD_IN_METERS:
                 return st_run
 
     return None
@@ -268,7 +283,7 @@ def st_append_strava_info(strava, sr_run, st_runs, args, google_maps_apikey=None
         logging.debug("PHOTO: %s" % pprint.pformat(photo))
         logging.debug("        ref : %s" % (photo.ref))
         logging.debug("        urls: %s" % (pprint.pformat(photo.urls)))
-        fname = download_url(photo.urls[str(STRAVA_PHOTO_SIZE)])
+        fname = download_url(photo.urls[str(CFG_STRAVA_PHOTO_SIZE)])
         if fname is not None:
             sr_run['__photos'].append(fname)
 
@@ -337,13 +352,7 @@ def sr_get_split_info(details, split_interval=1.0 * UNITS.mile):
     return splits
 
 
-def activity_title(run):
-    notes = run['notes']
-    prefix = '::Location='
-    for line in notes.splitlines():
-        if line.startswith(prefix):
-            return line[len(prefix):]
-
+def default_title(run):
     # Otherwise some default
     return 'SmashRun Activity on %s' % (run['__localtime'])
 
@@ -459,7 +468,7 @@ def sr_get_runs(smashrun, start, stop, userinfo, badges):
         activity['__id'] = {'smashrun': activity['activityId']}
         activity['__activity_urls'] = {'smashrun': 'http://smashrun.com/%s/run/%s' % (userinfo['userName'],
                                                                                       activity['activityId'])}
-        activity['__title'] = activity_title
+        activity['__title_fn'] = CFG_ACTIVITY_TITLE_FN
         activity['__notes'] = activity['notes'] + "\n"
         activity['__localtime'] = localtime
         activity['__tags'] = ['smashrun']
@@ -522,8 +531,11 @@ def create_journal_entry(args, run):
     dayone_args = ["'%s'" % (x) if ' ' in x else x for x in dayone_args]
     logging.info("Invoking: %s" % (' '.join(dayone_args)))
 
+    title_fn = run['__title_fn']
+    if title_fn is None:
+        title_fn = default_title
     entry_text = ''
-    entry_text += '# %s\n' % (run['__title'](run))
+    entry_text += '# %s\n' % (title_fn(run))
     entry_text += '# Notes\n%s\n' % (run['__notes'])
     entry_text += '# Splits\n%s\n' % split_markdown
     if len(run['__badges']) > 0:
@@ -541,12 +553,13 @@ def create_journal_entry(args, run):
 
         entry_text += '   * [%s Link](%s)%s\n' % (service_map[service], url, ident)
 
-    if args.dryrun:
+    if args.dryrun or args.debug:
         logging.info("Entry text:\n" + entry_text)
-        return
+        if args.dryrun:
+            return
 
     p = subprocess.Popen(dayone_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    stdout, stderr = p.communicate(input=entry_text)
+    stdout, stderr = p.communicate(input=entry_text.encode('utf-8'))
     if stdout is None:
         stdout = ''
     if stderr is None:
