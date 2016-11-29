@@ -29,7 +29,6 @@
 # POSSIBILITY OF SUCH DAMAGE. 
 
 # FIXME: Remove get_activity_photos workarounds if stravalib gets fixed
-# FIXME: Remove buggy_start workaroungs if smashrun-client gets fixed
 # FIXME: Bug when there are two runs on the same day a badge is required -- I think both will get it
 
 import argparse
@@ -251,6 +250,16 @@ def st_find_strava_run(sr_run, st_runs):
         if abs(st_time - sr_time).total_seconds() < CFG_START_TIME_THRESHOLD_IN_SECS:
             if abs(st_distance - sr_distance) < CFG_DISTANCE_THRESHOLD_IN_METERS:
                 return st_run
+            else:
+                logging.debug("Not matching %s and %s: distance %s is greater than threshold %s" % (sr_run['__id'],
+                                                                                                    st_run['id'],
+                                                                                                    abs(st_distance - sr_distance),
+                                                                                                    CFG_DISTANCE_THRESHOLD_IN_METERS))
+        else:
+            logging.debug("Not matching %s and %s: start time %s is greater than threshold %s" % (sr_run['__id'],
+                                                                                                 st_run['id'],
+                                                                                                 abs(st_time - sr_time),
+                                                                                                 CFG_START_TIME_THRESHOLD_IN_SECS))
 
     return None
 
@@ -436,10 +445,7 @@ def sr_get_runs(smashrun, start, stop, userinfo, badges):
     logging.info("                     STOP: %s" % (stop))
 
     activities = []
-    # FIXME: If smashrun-client is fixed, can remove this buggy_start stuff
-    delta = start - start.replace(tzinfo=from_zone)
-    buggy_start = start - delta
-    for r in smashrun.get_activities(since=buggy_start):
+    for r in smashrun.get_activities(since=start):
         # 2016-11-17T07:11:00-08:00
         dt = r['startDateTimeLocal'][:-6]
         tz = r['startDateTimeLocal'][-6:]
