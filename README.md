@@ -48,7 +48,7 @@ strava:
      client_secret: XXX
      access_token: XXX
 
-google_maps_apikey: XXX
+google_apikey: XXX
 ```
 
 Details on how to obtain access tokens is left as an exerecise to the reader at this point.

@@ -1,0 +1,314 @@
+#!/usr/bin/env python
+# vim: ft=python expandtab softtabstop=0 tabstop=4 shiftwidth=4
+#
+# Copyright (c) 2016, Jon Nall
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#  * Redistributions of source code must retain the above copyright notice,
+#    this list of conditions and the following disclaimer.
+#  * Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#  * Neither the name of  nor the names of its contributors may be used to
+#    endorse or promote products derived from this software without specific
+#    prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+# FIXME: Remove get_activity_photos workarounds if stravalib gets fixed
+# FIXME: Bug when there are two runs on the same day a badge is required -- I think both will get it
+
+# FIXME: Remove this path hack
+import sys
+sys.path.insert(0, '/Users/nall/Code/smashrun-utils')
+
+import argparse
+import dateutil
+import logging
+import os
+import subprocess
+import sys
+import yaml
+
+from datetime import date
+from datetime import datetime
+from wrappers import smashrun_client, SmashrunWrapper, strava_client, StravaWrapper
+
+import smashrun.utils as sru
+
+
+def custom_title(run):
+    notes = run['notes']
+    prefix = '::Location='
+    for line in notes.splitlines():
+        if line.startswith(prefix):
+            title = line[len(prefix):].strip()
+            if title != '':
+                return title
+    return default_title(run)
+
+
+# Generally nothing below this line should be changed
+UNITS = sru.UNITS
+STATE_FILE_PREFIX = 'LastUpdateStop: '
+STATE_FILE_TIME_FORMAT = '%Y-%m-%dT%H:%M:%S'  # this is in local time
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--credentials_file', type=str, required=True, help='The name of the file holding service credentials')
+    parser.add_argument('--config_file',  default='dayonerunlog.conf', help='The configuration file to use')
+    parser.add_argument('--journal',          type=str,                help='The name of the DayOne journal to use')
+    parser.add_argument('--start',            type=str,                help='An initial start date of the form YYYY-MM-DD[THH:MM:SS]')
+    parser.add_argument('--stop',             type=str,                help='An end date of the form YYYY-MM-DD[THH:MM:SS]')
+    parser.add_argument('--days',             type=int,                help='Number of days since start to process')
+    parser.add_argument('--tag', dest='tags', type=str, default=[],    action='append', help='Additional tags to apply to each journal entry')    # noqa
+    parser.add_argument('--state_file',       type=str,                help='Request all runs since state file\'s modification time and update time afterwards')  # noqa
+    parser.add_argument('--create_state_file', action='store_true', help='Create a state file based on this invocation')
+    parser.add_argument('--no_coordinates',    action='store_true', help='Do not attempt to set coordinates for the DayOne entry')
+    parser.add_argument('--no_badges',         action='store_true', help='Do not attempt to download any badges')
+    parser.add_argument('--no_photos',         action='store_true', help='Do not attempt to download any photos')
+    parser.add_argument('--dryrun',            action='store_true', help='Do not create journal entries. Just print the CLI commands to do so')  # noqa
+    parser.add_argument('--debug',             action='store_true', help='Enable verbose debug')
+    args = parser.parse_args()
+
+    if not os.path.isfile(args.credentials_file):
+        parser.error('No such credentials file: %s' % (args.credentials_file))
+    if not os.path.isfile(args.config_file):
+        parser.error('No such config file: %s' % (args.config_file))
+    if args.state_file and not os.path.isfile(args.state_file):
+        parser.error('No such state file: %s' % (args.state_file))
+    if args.state_file and args.start and not args.create_state_file:
+        parser.error("Must specify at most one of --start and --state_file")
+    if args.state_file and args.days and not args.create_state_file:
+        parser.error("Must specify at most one of --state_file and --days")
+    if args.stop and args.days:
+        parser.error("Must specify at most one of --stop and --days")
+
+    setattr(args, 'badges', True)
+    if args.no_badges is not None:
+        setattr(args, 'badges', not args.no_badges)
+    setattr(args, 'photos', True)
+    if args.no_photos is not None:
+        setattr(args, 'photos', not args.no_photos)
+
+    with open(args.credentials_file, 'r') as fh:
+        setattr(args, 'credentials', yaml.load(fh))
+        args.credentials.setdefault('smashrun', None)
+        args.credentials.setdefault('strava', None)
+        args.credentials.setdefault('google_apikey', None)
+
+    with open(args.config_file, 'r') as fh:
+        setattr(args, 'config', yaml.load(fh))
+        args.config.setdefault('matched_activities', [])
+        args.config.setdefault('max_start_time_delta_in_secs', 90)
+        args.config.setdefault('max_distance_delta_in_meters', 150)
+        args.config.setdefault('strava_photo_size', 1000)
+        args.config.setdefault('activity_title_fn', None)
+
+    return args
+
+
+def setup(argv):
+    args = parse_args(argv)
+    logging.basicConfig(filename='dayonerunlog.log', level=logging.DEBUG if args.debug else logging.INFO)
+    console = logging.StreamHandler()
+    console.setLevel(logging.DEBUG if args.debug else logging.INFO)
+    formatter = logging.Formatter('%(levelname)-8s %(message)s')
+    console.setFormatter(formatter)
+    logging.getLogger('').addHandler(console)
+
+    to_zone = dateutil.tz.tzlocal()
+
+    if args.start is None:
+        if args.state_file and not args.create_state_file:
+            tstamp = None
+            with open(args.state_file, 'r') as fh:
+                for line in fh.readlines():
+                    if line.startswith(STATE_FILE_PREFIX):
+                        tstamp = line[len(STATE_FILE_PREFIX):].rstrip()
+                        break
+            assert tstamp is not None, "Unable to determine last update time from %s" % (args.state_file)
+            args.start = datetime.strptime(tstamp, STATE_FILE_TIME_FORMAT)
+        else:
+            # Use yesterday
+            args.start = date.fromordinal(date.today().toordinal() - 1)
+            args.start = datetime.combine(args.start, datetime.min.time())
+    else:
+        fmt = '%Y-%m-%dT%H:%M:%S' if args.start.find('T') != -1 else '%Y-%m-%d'
+        args.start = datetime.strptime(args.start, fmt)
+    args.start = args.start.replace(tzinfo=to_zone)
+
+    if args.stop is None:
+        if args.days is None:
+            args.stop = datetime.now()
+        else:
+            args.stop = date.fromordinal(args.start.toordinal() + args.days)
+            args.stop = datetime.combine(args.stop, datetime.max.time())
+    else:
+        fmt = '%Y-%m-%dT%H:%M:%S' if args.stop.find('T') != -1 else '%Y-%m-%d'
+        args.stop = datetime.strptime(args.stop, fmt)
+
+    args.stop = args.stop.replace(tzinfo=to_zone)
+
+    return args
+
+
+def time_string(pace):
+    SECS_PER_SEC = 1.0
+    SECS_PER_MIN = SECS_PER_SEC * 60.0
+    SECS_PER_HOUR = SECS_PER_MIN * 60.0
+    hours = int(pace / SECS_PER_HOUR)
+    secs_left = (pace - (hours * SECS_PER_HOUR))
+    minutes = int(secs_left / SECS_PER_MIN)
+    secs_left = int((secs_left - (minutes * SECS_PER_MIN)))
+
+    s = ''
+    if hours > 0:
+        s += '%02d:' % (hours)
+    if hours > 0 or minutes > 0:
+        s += '%02d:' % (minutes)
+    s += '%02d' % (secs_left)
+
+    return s
+
+
+def default_title(run):
+    # Otherwise some default
+    return 'SmashRun Activity on %s' % (run['__localtime'])
+
+
+def gen_split_markdown(splits):
+    table = ''
+    table += 'Distance | Total Time | Split Time | Split Pace | Total Pace\n'
+    table += '-------- | ---------- | ---------- | ---------- | ----------\n'
+    for split in splits:
+        table += '%.2f | ' % (split['total_distance'].magnitude)
+        table += '%s | ' % (time_string(split['total_time'].magnitude))
+        table += '%s | ' % (time_string(split['split_time'].magnitude))
+        table += '%s | ' % (time_string(split['split_pace'].magnitude))
+        table += '%s\n' % (time_string(split['total_pace'].magnitude))
+    table += '\n'
+    return table
+
+
+def create_journal_entry(args, run):
+    split_markdown = gen_split_markdown(run['__splits'])
+    dayone_args = ['dayone2']
+
+    if args.journal is not None:
+        dayone_args.extend(['--journal', args.journal])
+
+    dayone_args.extend(['--date', run['__localtime'].strftime('%Y-%m-%d %H:%M:%S')])
+
+    # Our tag + run-specific tags + command line tags
+    dayone_args.extend(['--tags', 'dayonerun'] + run['__tags'] + args.tags)
+
+    if not args.no_coordinates and run['__coordinate'][0] is not None and run['__coordinate'][1] is not None:
+        dayone_args.extend(['--coordinate', str(run['__coordinate'][0]), str(run['__coordinate'][1])])
+
+    if len(run['__photos']) > 0:
+        dayone_args.append('--photos')
+        dayone_args.extend(run['__photos'])
+
+    dayone_args.append('--')
+    dayone_args.append('new')
+
+    dayone_args = ["'%s'" % (x) if ' ' in x else x for x in dayone_args]
+    logging.info("Invoking: %s" % (' '.join(dayone_args)))
+
+    title_fn = run['__title_fn']
+    if title_fn is None:
+        title_fn = default_title
+    entry_text = ''
+    entry_text += '# %s\n' % (title_fn(run))
+    entry_text += '# Notes\n%s\n' % (run['__notes'])
+    entry_text += '# Splits\n%s\n' % split_markdown
+    if len(run['__badges']) > 0:
+        entry_text += '# Badges\n'
+        for badge in run['__badges']:
+            entry_text += '   * **%s**: %s\n' % (badge['name'], badge['requirement'])
+        entry_text += '\n'
+    entry_text += '# Misc\n'
+    service_map = {'smashrun': 'SmashRun', 'strava': 'Strava'}
+
+    for service, url in run['__activity_urls'].iteritems():
+        ident = ''
+        if service in run['__id']:
+            ident = ' ID: `%s`' % (run['__id'][service])
+
+        entry_text += '   * [%s Link](%s)%s\n' % (service_map[service], url, ident)
+
+    if args.dryrun or args.debug:
+        logging.info("Entry text:\n" + entry_text)
+        if args.dryrun:
+            return
+
+    p = subprocess.Popen(dayone_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    stdout, stderr = p.communicate(input=entry_text.encode('utf-8'))
+    if stdout is None:
+        stdout = ''
+    if stderr is None:
+        stderr = ''
+    if p.returncode != 0:
+        logging.error("Unable to create journal entry:")
+        for line in stdout.splitlines() + stderr.splitlines():
+            logging.error("    %s" % (line))
+        raise RuntimeError("Unable to create journal entry with %s" % (' '.join(dayone_args)))
+    else:
+        logging.info("Created journal entry successfully")
+
+
+def main(args):
+    smashrun = strava = None
+    config = args.config
+    services = []
+
+    if 'smashrun' in args.credentials:
+        smashrun = SmashrunWrapper(smashrun_client(**args.credentials['smashrun']), config)
+        services.append(smashrun)
+    if 'strava' in args.credentials:
+        strava = StravaWrapper(strava_client(**args.credentials['strava']), config)
+        # services.append(strava)
+
+    if len(services) == 0:
+        raise ValueError("No services configured. Must have at least one")
+
+    preferred_service = smashrun if config.setdefault('prefer_strava', False) else strava
+    preferred_service.preferred = True
+
+    try:
+        for service in services:
+            service.download(args.start, args.stop, args.badges, args.photos)
+
+        for service in services:
+            preferred_service.merge_service(service)
+
+        if args.state_file or args.create_state_file:
+            with open(args.state_file, 'w') as fh:
+                fh.write("Command: %s\n" % (' '.join(sys.argv)))
+                fh.write("LastUpdateStart: %s\n" % (args.start.strftime(STATE_FILE_TIME_FORMAT)))
+                fh.write("%s%s\n" % (STATE_FILE_PREFIX, args.stop.strftime(STATE_FILE_TIME_FORMAT)))
+
+        for run in preferred_service.activities:
+            create_journal_entry(args, run)
+    finally:
+        preferred_service.cleanup()
+
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main(setup(sys.argv[1:])))
