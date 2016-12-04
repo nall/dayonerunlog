@@ -79,6 +79,7 @@ def parse_args(argv):
     parser.add_argument('--state_file',       type=str,                help='Request all runs since state file\'s modification time and update time afterwards')  # noqa
     parser.add_argument('--create_state_file', action='store_true', help='Create a state file based on this invocation')
     parser.add_argument('--no_coordinates',    action='store_true', help='Do not attempt to set coordinates for the DayOne entry')
+    parser.add_argument('--no_routes',         action='store_true', help='Do not attempt to generate any route images')
     parser.add_argument('--no_badges',         action='store_true', help='Do not attempt to download any badges')
     parser.add_argument('--no_photos',         action='store_true', help='Do not attempt to download any photos')
     parser.add_argument('--dryrun',            action='store_true', help='Do not create journal entries. Just print the CLI commands to do so')  # noqa
@@ -104,6 +105,9 @@ def parse_args(argv):
     setattr(args, 'photos', True)
     if args.no_photos is not None:
         setattr(args, 'photos', not args.no_photos)
+    setattr(args, 'routes', True)
+    if args.no_routes is not None:
+        setattr(args, 'routes', not args.no_routes)
 
     with open(args.credentials_file, 'r') as fh:
         setattr(args, 'credentials', yaml.load(fh))
@@ -186,9 +190,8 @@ def time_string(pace):
     return s
 
 
-def default_title(run):
-    # Otherwise some default
-    return 'SmashRun Activity on %s' % (run['__localtime'])
+def default_title(activity):
+    return '%s Activity on %s' % (activity.service.name, activity.start)
 
 
 def gen_split_markdown(splits):
@@ -205,24 +208,25 @@ def gen_split_markdown(splits):
     return table
 
 
-def create_journal_entry(args, run):
-    split_markdown = gen_split_markdown(run['__splits'])
+def create_journal_entry(args, activity):
+    split_markdown = gen_split_markdown(activity.splits)
     dayone_args = ['dayone2']
 
     if args.journal is not None:
         dayone_args.extend(['--journal', args.journal])
 
-    dayone_args.extend(['--date', run['__localtime'].strftime('%Y-%m-%d %H:%M:%S')])
+    dayone_args.extend(['--date', activity.start.strftime('%Y-%m-%d %H:%M:%S')])
 
     # Our tag + run-specific tags + command line tags
-    dayone_args.extend(['--tags', 'dayonerun'] + run['__tags'] + args.tags)
+    dayone_args.extend(['--tags', 'dayonerun'] + activity.tags + args.tags)
 
-    if not args.no_coordinates and run['__coordinate'][0] is not None and run['__coordinate'][1] is not None:
-        dayone_args.extend(['--coordinate', str(run['__coordinate'][0]), str(run['__coordinate'][1])])
+    coordinates = activity.start_coordinates
+    if not args.no_coordinates and coordinates is not None:
+        dayone_args.extend(['--coordinate', str(coordinates[0]), str(coordinates[1])])
 
-    if len(run['__photos']) > 0:
+    if len(activity.photos) > 0:
         dayone_args.append('--photos')
-        dayone_args.extend(run['__photos'])
+        dayone_args.extend(activity.photos)
 
     dayone_args.append('--')
     dayone_args.append('new')
@@ -230,27 +234,23 @@ def create_journal_entry(args, run):
     dayone_args = ["'%s'" % (x) if ' ' in x else x for x in dayone_args]
     logging.info("Invoking: %s" % (' '.join(dayone_args)))
 
-    title_fn = run['__title_fn']
-    if title_fn is None:
-        title_fn = default_title
+    title_fn = default_title
+    #title_fn = activity.title_fn
+    #if title_fn is None:
+    #    title_fn = default_title
     entry_text = ''
-    entry_text += '# %s\n' % (title_fn(run))
-    entry_text += '# Notes\n%s\n' % (run['__notes'])
+    entry_text += '# %s\n' % (title_fn(activity))
+    entry_text += '# Notes\n%s\n' % (activity.notes)
     entry_text += '# Splits\n%s\n' % split_markdown
-    if len(run['__badges']) > 0:
+    if len(activity.badges) > 0:
         entry_text += '# Badges\n'
-        for badge in run['__badges']:
+        for badge in activity.badges:
             entry_text += '   * **%s**: %s\n' % (badge['name'], badge['requirement'])
         entry_text += '\n'
     entry_text += '# Misc\n'
-    service_map = {'smashrun': 'SmashRun', 'strava': 'Strava'}
 
-    for service, url in run['__activity_urls'].iteritems():
-        ident = ''
-        if service in run['__id']:
-            ident = ' ID: `%s`' % (run['__id'][service])
-
-        entry_text += '   * [%s Link](%s)%s\n' % (service_map[service], url, ident)
+    for a in [activity] + activity.linked_activities:
+        entry_text += '   * [%s Link](%s) ID: `%s`\n' % (a.service.name, a.service.url_for_activity(a), a.id)
 
     if args.dryrun or args.debug:
         logging.info("Entry text:\n" + entry_text)
@@ -278,24 +278,25 @@ def main(args):
     services = []
 
     if 'smashrun' in args.credentials:
-        smashrun = SmashrunWrapper(smashrun_client(**args.credentials['smashrun']), config)
+        smashrun = SmashrunWrapper(smashrun_client(**args.credentials['smashrun']), google_apikey=args.credentials['google_apikey'], config=config)
         services.append(smashrun)
     if 'strava' in args.credentials:
-        strava = StravaWrapper(strava_client(**args.credentials['strava']), config)
+        strava = StravaWrapper(strava_client(**args.credentials['strava']), google_apikey=args.credentials['google_apikey'], config=config)
         # services.append(strava)
 
     if len(services) == 0:
         raise ValueError("No services configured. Must have at least one")
 
-    preferred_service = smashrun if config.setdefault('prefer_strava', False) else strava
+    preferred_service = smashrun if not config.setdefault('prefer_strava', False) else strava
     preferred_service.preferred = True
 
     try:
         for service in services:
-            service.download(args.start, args.stop, args.badges, args.photos)
+            service.download(args.start, args.stop, args.badges, args.photos, args.routes)
 
         for service in services:
-            preferred_service.merge_service(service)
+            if not service.preferred:
+                preferred_service.merge_service(service)
 
         if args.state_file or args.create_state_file:
             with open(args.state_file, 'w') as fh:
@@ -303,8 +304,8 @@ def main(args):
                 fh.write("LastUpdateStart: %s\n" % (args.start.strftime(STATE_FILE_TIME_FORMAT)))
                 fh.write("%s%s\n" % (STATE_FILE_PREFIX, args.stop.strftime(STATE_FILE_TIME_FORMAT)))
 
-        for run in preferred_service.activities:
-            create_journal_entry(args, run)
+        for activity in preferred_service.activities.values():
+            create_journal_entry(args, activity)
     finally:
         preferred_service.cleanup()
 

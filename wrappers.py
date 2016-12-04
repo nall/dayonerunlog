@@ -1,5 +1,6 @@
 # vim: ft=python expandtab softtabstop=0 tabstop=4 shiftwidth=4
 import collections
+import copy
 import functools
 import logging
 import polyline
@@ -15,6 +16,17 @@ from smashrun.client import Smashrun
 
 
 UNITS = sru.UNITS
+
+
+def download_url(url):
+    r = requests.get(url)
+    if r.status_code == 200:
+        with tempfile.NamedTemporaryFile(prefix='dayonerun_photo_', delete=False) as fh:
+            fh.write(r.content)
+            return fh.name
+    else:
+        logging.warning("Unable to download %s: %s" % (url, r.text))
+        return None
 
 
 def strava_client(client_id=None, client_secret=None, refresh_token=None, access_token=None):
@@ -53,6 +65,22 @@ class ActivityWrapper(object):
     def __init__(self, service, details):
         self.service = service
         self.details = details
+        self.linked_activities = []
+        self._badges = []
+        self._photos = []
+        self.tags = []
+
+    def all_badges(self):
+        badges = copy.deepcopy(self._badges)
+        for a in self.linked_activities:
+            badges.extend(a.badges)
+        return badges
+
+    def all_photos(self):
+        photos = copy.deepcopy(self._photos)
+        for a in self.linked_activities:
+            photos.extend(a.photos)
+        return photos
 
 
 class SmashrunActivity(ActivityWrapper):
@@ -60,10 +88,19 @@ class SmashrunActivity(ActivityWrapper):
         super(SmashrunActivity, self).__init__(service, details)
         self.title_fn = title_fn
         self._splits = None
+        self.tags = [self.service.id]
 
     @property
     def id(self):
         return self.details['activityId']
+
+    @property
+    def badges(self):
+        return self.all_badges()
+
+    @property
+    def photos(self):
+        return self.all_photos()
 
     @property
     def notes(self):
@@ -81,13 +118,21 @@ class SmashrunActivity(ActivityWrapper):
     def distance(self):
         return sru.get_distance(self.details)
 
-    def splits(self, split_interval=1.0 * UNITS.mile):
+    @property
+    def splits(self):
+        return self.__splits()
+
+    @property
+    def polyline(self):
+        return polyline.encode(sru.get_coordinates(self.details))
+
+    def __splits(self, split_interval=1.0 * UNITS.mile):
         if self._splits is None:
-            distances = sru.get_records(self, 'distance')
+            distances = sru.get_records(self.details, 'distance')
             if distances is None:
                 return None
 
-            clocks = sru.get_records(self, 'clock')
+            clocks = sru.get_records(self.details, 'clock')
             if clocks is None:
                 return None
 
@@ -141,9 +186,14 @@ class StravaActivity(ActivityWrapper):
 
 
 class ServiceWrapper(object):
-    def __init__(self, client, service_id, config):
+    def __init__(self, client, name, service_id, google_apikey=None, config=None):
+        if config is None:
+            raise ValueError("No config passed to %s service" % (service_id))
+
         self.client = client
+        self.name = name
         self.id = service_id
+        self.google_apikey = google_apikey
         self.config = config
         self.activities = {}
         self.preferred = False
@@ -154,15 +204,18 @@ class ServiceWrapper(object):
                 logging.info("Deleting %s:%s temp photo %s" % (self.name, activity.id, photo))
                 os.unlink(photo)
 
-    def download(self, start, stop, badges=True, photos=True, activity_types=['run']):
+    def download(self, start, stop, badges=True, photos=True, routes=True, activity_types=['run']):
         self.activities = self.download_activities(start, stop, activity_types)
         for activity in self.activities.values():
-            activity.polyline = self.polyline_for_activity(activity)
-
             if badges:
-                activity.badges = self.badges_for_activity(activity)
+                activity._badges = self.badges_for_activity(activity)
             if photos:
-                activity.photos = self.photos_for_activity(activity)
+                activity._photos = self.photos_for_activity(activity)
+
+            if self.preferred and routes:
+                image = self.route_image_for_activity(activity)
+                if image is not None:
+                    activity._photos.insert(0, image)
 
     def match_activity(self, service, activity):
         matched_id = None
@@ -176,7 +229,7 @@ class ServiceWrapper(object):
 
         # We may have gotten here and not found a match. If so, we have to try manually
         if matched_id is None:
-            for candidate in self.activities:
+            for candidate in self.activities.values():
                 max_len = max(len(self.id), len(service.id))
                 time_delta = abs(activity.start - candidate.start).total_seconds()
                 dist_delta = abs((activity.distance - candidate.distance).magnitude)
@@ -209,17 +262,24 @@ class ServiceWrapper(object):
 
             if matched_id is not None:
                 logging.info("Merging %s:%s into %s:%s..." % (service.id, matched_id, self.id, activity.id))
-                self.badges.extend(activity.badges)
-                self.photos.extend(activity.photos)
+                self.activities[matched_id].linked_activities.append(activity)
+
+    def route_image_for_activity(self, activity):
+        if activity.polyline is not None and self.google_apikey is not None:
+            poly = urllib.quote(activity.polyline)
+            url = 'https://maps.googleapis.com/maps/api/staticmap?size=640x640&path=weight:6%%7Ccolor:blue%%7Cenc:%s&key=%s' % (poly, self.google_apikey)  # noqa
+            fname = download_url(url)
+            if fname is not None:
+                return fname
+
+        return None
+
 
     def download_activities(self, start, stop, activity_types=['run']):
         raise NotImplementedError("Subclass must implement download_activities")
 
-    def url_for_activity(self, activity_id):
+    def url_for_activity(self, activity):
         raise NotImplementedError("Subclass must implement url_for_activity")
-
-    def polyline_for_activity(self, activity):
-        raise NotImplementedError("Subclass must implement polyline_for_activity")
 
     def photos_for_activity(self, activity):
         raise NotImplementedError("Subclass must implement photos_for_activity")
@@ -227,22 +287,16 @@ class ServiceWrapper(object):
     def badges_for_activity(self, activity):
         raise NotImplementedError("Subclass must implement badges_for_activity")
 
-    def splits_for_activity(self, activity):
-        raise NotImplementedError("Subclass must implement splits_for_activity")
-
 
 class SmashrunWrapper(ServiceWrapper):
-    def __init__(self, client, config):
-        super(SmashrunWrapper, self).__init__(client, 'smashrun', config)
+    def __init__(self, client, **kwargs):
+        super(SmashrunWrapper, self).__init__(client, 'Smashrun', 'smashrun', **kwargs)
         self.badges = None
         self.badge_earned_info = None
         self.userinfo = client.get_userinfo()
 
-    def url_for_activity(self, activity_id):
-        return 'http://smashrun.com/%s/run/%s' % (self.userinfo['userName'], activity_id)
-
-    def polyline_for_activity(self, activity):
-        return polyline.encode(sru.get_coordinates(activity.details))
+    def url_for_activity(self, activity):
+        return 'http://smashrun.com/%s/run/%s' % (self.userinfo['userName'], activity.id)
 
     def photos_for_activity(self, activity):
         # Smashrun doesn't support photos
@@ -258,10 +312,6 @@ class SmashrunWrapper(ServiceWrapper):
         # activity['__photos'] = sr_get_badge_photos(activity['activityId'], activity['__badges'])
 
         return []
-
-    def splits_for_activity(self, activity):
-        # FIXME: sr_get_split_info(details)
-        assert False
 
     def download_activities(self, start, stop, activity_types=['run']):
         activity_type_map = {'running': 'run'}
@@ -330,8 +380,8 @@ def sr_get_badge_photos(activity_id, badges):
 
 
 class StravaWrapper(ServiceWrapper):
-    def __init__(self, client, config):
-        super(StravaWrapper, self).__init__(client, 'strava', config)
+    def __init__(self, client, **kwargs):
+        super(StravaWrapper, self).__init__(client, 'Strava', 'strava', **kwargs)
 
 
 def st_get_photos(self, strava, activity_id):
