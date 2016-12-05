@@ -237,7 +237,7 @@ def create_journal_entry(args, activity):
     dayone_args = ["'%s'" % (x) if ' ' in x else x for x in dayone_args]
     logging.info("Invoking: %s" % (' '.join(dayone_args)))
 
-    title_fn = default_title
+    title_fn = lambda a: default_title(a) if a.title is None else a.title
     #title_fn = activity.title_fn
     #if title_fn is None:
     #    title_fn = default_title
@@ -279,10 +279,10 @@ def main(args):
     config = args.config
     services = collections.OrderedDict()
 
-    #if 'smashrun' in args.credentials:
-    #    services['smashrun'] = SmashrunWrapper(smashrun_client(**args.credentials['smashrun']),
-    #                                           google_apikey=args.credentials['google_apikey'],
-    #                                           config=config)
+    if 'smashrun' in args.credentials:
+        services['smashrun'] = SmashrunWrapper(smashrun_client(**args.credentials['smashrun']),
+                                               google_apikey=args.credentials['google_apikey'],
+                                               config=config)
     if 'strava' in args.credentials:
         services['strava'] = StravaWrapper(strava_client(**args.credentials['strava']),
                                            google_apikey=args.credentials['google_apikey'],

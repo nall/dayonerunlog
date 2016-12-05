@@ -207,7 +207,7 @@ class StravaActivity(ActivityWrapper):
 
     @property
     def title(self):
-        return self.details['title'] + "\n"
+        return self.details['name'] + "\n"
 
     @property
     def notes(self):
