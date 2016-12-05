@@ -115,6 +115,10 @@ class SmashrunActivity(ActivityWrapper):
         return self.details['activityId']
 
     @property
+    def title(self):
+        return None
+
+    @property
     def notes(self):
         return self.details['notes'] + "\n"
 
@@ -202,6 +206,18 @@ class StravaActivity(ActivityWrapper):
         return mapinfo.setdefault('polyline', None)
 
     @property
+    def title(self):
+        return self.details['title'] + "\n"
+
+    @property
+    def notes(self):
+        return self.details['description'] + "\n"
+
+    @property
+    def start_coordinates(self):
+        return (self.details['start_latlng'][0], self.details['start_latlng'][1])
+
+    @property
     def distance(self):
         return float(self.details['distance']) * UNITS.meters
 
@@ -210,6 +226,26 @@ class StravaActivity(ActivityWrapper):
         # FIXME: This shouldn't be tzlocal, but the local timezone at the place of activity
         utc = datetime.strptime(self.details['start_date'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dateutil.tz.tzutc())
         return utc.astimezone(dateutil.tz.tzlocal())
+
+    @property
+    def splits(self):
+        splits = []
+        total_distance = 0.0 * UNITS.miles
+        total_time = 0.0 * UNITS.seconds
+
+        for split in self.details['splits_standard']:
+            split_distance = (float(split['distance']) * UNITS.meters).to(UNITS.miles)
+            split_time = float(split['moving_time']) * UNITS.seconds
+            total_time += split_time
+            total_distance += split_distance
+            splits.append({'total_distance': total_distance,
+                           'split_distance': split_distance,
+                           'total_time': total_time,
+                           'split_time': split_time,
+                           'split_pace': split_time / split_distance,
+                           'total_pace': total_time / total_distance
+                           })
+        return splits
 
 
 class ServiceWrapper(object):

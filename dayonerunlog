@@ -279,10 +279,10 @@ def main(args):
     config = args.config
     services = collections.OrderedDict()
 
-    if 'smashrun' in args.credentials:
-        services['smashrun'] = SmashrunWrapper(smashrun_client(**args.credentials['smashrun']),
-                                               google_apikey=args.credentials['google_apikey'],
-                                               config=config)
+    #if 'smashrun' in args.credentials:
+    #    services['smashrun'] = SmashrunWrapper(smashrun_client(**args.credentials['smashrun']),
+    #                                           google_apikey=args.credentials['google_apikey'],
+    #                                           config=config)
     if 'strava' in args.credentials:
         services['strava'] = StravaWrapper(strava_client(**args.credentials['strava']),
                                            google_apikey=args.credentials['google_apikey'],
