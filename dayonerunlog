@@ -36,6 +36,7 @@ import sys
 sys.path.insert(0, '/Users/nall/Code/smashrun-utils')
 
 import argparse
+import collections
 import dateutil
 import logging
 import os
@@ -122,13 +123,15 @@ def parse_args(argv):
         args.config.setdefault('max_distance_delta_in_meters', 150)
         args.config.setdefault('strava_photo_size', 1000)
         args.config.setdefault('activity_title_fn', None)
+        if args.config.setdefault('primary_service', None) is None:
+            parser.error("No primary_service value set in the config file") 
 
     return args
 
 
 def setup(argv):
     args = parse_args(argv)
-    logging.basicConfig(filename='dayonerunlog.log', level=logging.DEBUG if args.debug else logging.INFO)
+    logging.basicConfig(filename='dayonerunlog.log', filemode='w', level=logging.DEBUG if args.debug else logging.INFO)
     console = logging.StreamHandler()
     console.setLevel(logging.DEBUG if args.debug else logging.INFO)
     formatter = logging.Formatter('%(levelname)-8s %(message)s')
@@ -273,30 +276,34 @@ def create_journal_entry(args, activity):
 
 
 def main(args):
-    smashrun = strava = None
     config = args.config
-    services = []
+    services = collections.OrderedDict()
 
     if 'smashrun' in args.credentials:
-        smashrun = SmashrunWrapper(smashrun_client(**args.credentials['smashrun']), google_apikey=args.credentials['google_apikey'], config=config)
-        services.append(smashrun)
+        services['smashrun'] = SmashrunWrapper(smashrun_client(**args.credentials['smashrun']),
+                                               google_apikey=args.credentials['google_apikey'],
+                                               config=config)
     if 'strava' in args.credentials:
-        strava = StravaWrapper(strava_client(**args.credentials['strava']), google_apikey=args.credentials['google_apikey'], config=config)
-        # services.append(strava)
+        services['strava'] = StravaWrapper(strava_client(**args.credentials['strava']),
+                                           google_apikey=args.credentials['google_apikey'],
+                                           config=config)
 
     if len(services) == 0:
         raise ValueError("No services configured. Must have at least one")
 
-    preferred_service = smashrun if not config.setdefault('prefer_strava', False) else strava
-    preferred_service.preferred = True
+    if config['primary_service'] in services:
+        primary_service = services[config['primary_service']]
+        primary_service.primary = True
+    else:
+        raise ValueError("No such primary service '%s' available. Use one of [%s]" % (config['primary_service'], ' '.join(services.keys())))
 
     try:
-        for service in services:
+        for service in services.values():
             service.download(args.start, args.stop, args.badges, args.photos, args.routes)
 
-        for service in services:
-            if not service.preferred:
-                preferred_service.merge_service(service)
+        for service in services.values():
+            if not service.primary:
+                primary_service.merge_service(service)
 
         if args.state_file or args.create_state_file:
             with open(args.state_file, 'w') as fh:
@@ -304,10 +311,10 @@ def main(args):
                 fh.write("LastUpdateStart: %s\n" % (args.start.strftime(STATE_FILE_TIME_FORMAT)))
                 fh.write("%s%s\n" % (STATE_FILE_PREFIX, args.stop.strftime(STATE_FILE_TIME_FORMAT)))
 
-        for activity in preferred_service.activities.values():
+        for activity in primary_service.activities.values():
             create_journal_entry(args, activity)
     finally:
-        preferred_service.cleanup()
+        primary_service.cleanup()
 
     return 0
 

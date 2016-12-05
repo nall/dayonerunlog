@@ -1,6 +1,7 @@
 # vim: ft=python expandtab softtabstop=0 tabstop=4 shiftwidth=4
 import collections
 import copy
+import dateutil
 import functools
 import logging
 import polyline
@@ -13,6 +14,8 @@ import tempfile
 import urllib
 
 from smashrun.client import Smashrun
+from datetime import datetime
+from dateutil.tz import tzoffset
 
 
 UNITS = sru.UNITS
@@ -62,13 +65,14 @@ def smashrun_client(client_id=None, client_secret=None, refresh_token=None, acce
 
 
 class ActivityWrapper(object):
-    def __init__(self, service, details):
+    def __init__(self, service, title_fn, details):
         self.service = service
+        self.title_fn = title_fn
         self.details = details
         self.linked_activities = []
         self._badges = []
         self._photos = []
-        self.tags = []
+        self._tags = [self.service.id]
 
     def all_badges(self):
         badges = copy.deepcopy(self._badges)
@@ -82,17 +86,15 @@ class ActivityWrapper(object):
             photos.extend(a.photos)
         return photos
 
-
-class SmashrunActivity(ActivityWrapper):
-    def __init__(self, service, details, title_fn):
-        super(SmashrunActivity, self).__init__(service, details)
-        self.title_fn = title_fn
-        self._splits = None
-        self.tags = [self.service.id]
+    def all_tags(self):
+        tags = copy.deepcopy(self._tags)
+        for a in self.linked_activities:
+            tags.extend(a.tags)
+        return tags
 
     @property
-    def id(self):
-        return self.details['activityId']
+    def tags(self):
+        return self.all_tags()
 
     @property
     def badges(self):
@@ -101,6 +103,16 @@ class SmashrunActivity(ActivityWrapper):
     @property
     def photos(self):
         return self.all_photos()
+
+
+class SmashrunActivity(ActivityWrapper):
+    def __init__(self, service, title_fn, details):
+        super(SmashrunActivity, self).__init__(service, title_fn, details)
+        self._splits = None
+
+    @property
+    def id(self):
+        return self.details['activityId']
 
     @property
     def notes(self):
@@ -116,7 +128,7 @@ class SmashrunActivity(ActivityWrapper):
 
     @property
     def distance(self):
-        return sru.get_distance(self.details)
+        return sru.get_distance(self.details).to(UNITS.meters)
 
     @property
     def splits(self):
@@ -177,12 +189,27 @@ class SmashrunActivity(ActivityWrapper):
 
 
 class StravaActivity(ActivityWrapper):
-    def __init__(self, service, details):
-        super(SmashrunActivity, self).__init__(service, details)
+    def __init__(self, service, title_fn, details):
+        super(StravaActivity, self).__init__(service, title_fn, details)
 
     @property
     def id(self):
         return self.details['id']
+
+    @property
+    def polyline(self):
+        mapinfo = self.details.setdefault('map', {})
+        return mapinfo.setdefault('polyline', None)
+
+    @property
+    def distance(self):
+        return float(self.details['distance']) * UNITS.meters
+
+    @property
+    def start(self):
+        # FIXME: This shouldn't be tzlocal, but the local timezone at the place of activity
+        utc = datetime.strptime(self.details['start_date'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dateutil.tz.tzutc())
+        return utc.astimezone(dateutil.tz.tzlocal())
 
 
 class ServiceWrapper(object):
@@ -196,7 +223,7 @@ class ServiceWrapper(object):
         self.google_apikey = google_apikey
         self.config = config
         self.activities = {}
-        self.preferred = False
+        self.primary = False
 
     def cleanup(self):
         for activity in self.activities.values():
@@ -205,17 +232,24 @@ class ServiceWrapper(object):
                 os.unlink(photo)
 
     def download(self, start, stop, badges=True, photos=True, routes=True, activity_types=['run']):
-        self.activities = self.download_activities(start, stop, activity_types)
+        self.activities = self.download_activities(start, stop, badges, photos, routes, activity_types)
+
         for activity in self.activities.values():
-            if badges:
-                activity._badges = self.badges_for_activity(activity)
             if photos:
                 activity._photos = self.photos_for_activity(activity)
-
-            if self.preferred and routes:
-                image = self.route_image_for_activity(activity)
-                if image is not None:
-                    activity._photos.insert(0, image)
+            if badges:
+                activity._badges = self.badges_for_activity(activity)
+                for badge in activity.badges:
+                    image = self.image_for_badge(badge)
+                    if image is not None:
+                        activity._photos.insert(0, image)
+            if routes:
+                # Only the primary service generates route images
+                if self.primary:
+                    image = self.route_image_for_activity(activity)
+                    if image is not None:
+                        # Insert in front of all photos to give this priority
+                        activity._photos.insert(0, image)
 
     def match_activity(self, service, activity):
         matched_id = None
@@ -233,8 +267,8 @@ class ServiceWrapper(object):
                 max_len = max(len(self.id), len(service.id))
                 time_delta = abs(activity.start - candidate.start).total_seconds()
                 dist_delta = abs((activity.distance - candidate.distance).magnitude)
-                logging.debug("%s%s: START=%s DIST=%sm" % (service.id, ' ' * (max_len - len(service.id)), activity.start, activity.distance))
-                logging.debug("%s%s: START=%s DIST=%sm" % (self.id, ' ' * (max_len - len(self.id)), candidate.start, candidate.distance))
+                logging.debug("%s%s: START=%s DIST=%s" % (service.id, ' ' * (max_len - len(service.id)), activity.start, activity.distance))
+                logging.debug("%s%s: START=%s DIST=%s" % (self.id, ' ' * (max_len - len(self.id)), candidate.start, candidate.distance))
                 logging.debug("%s  TIME (%ss) (max: %s)" % (' ' * max_len, time_delta, self.config['max_start_time_delta_in_secs']))
                 logging.debug("%s  DIST (%sm) (max: %s)" % (' ' * max_len, dist_delta, self.config['max_distance_delta_in_meters']))
 
@@ -261,7 +295,7 @@ class ServiceWrapper(object):
                 logging.warning("No %s activity found for %s:%s. Nothing to merge." % (self.id, service.id, activity.id))
 
             if matched_id is not None:
-                logging.info("Merging %s:%s into %s:%s..." % (service.id, matched_id, self.id, activity.id))
+                logging.info("Merging %s:%s into %s:%s..." % (service.id, activity.id, self.id, matched_id))
                 self.activities[matched_id].linked_activities.append(activity)
 
     def route_image_for_activity(self, activity):
@@ -274,18 +308,20 @@ class ServiceWrapper(object):
 
         return None
 
-
-    def download_activities(self, start, stop, activity_types=['run']):
-        raise NotImplementedError("Subclass must implement download_activities")
+    def download_activities(self, start, stop, badges, photos, routes, activity_types):
+        raise NotImplementedError("Subclass %s must implement download_activities" % (self.id))
 
     def url_for_activity(self, activity):
-        raise NotImplementedError("Subclass must implement url_for_activity")
+        raise NotImplementedError("Subclass %s must implement url_for_activity" % (self.id))
 
     def photos_for_activity(self, activity):
-        raise NotImplementedError("Subclass must implement photos_for_activity")
+        raise NotImplementedError("Subclass %s must implement photos_for_activity" % (self.id))
 
     def badges_for_activity(self, activity):
-        raise NotImplementedError("Subclass must implement badges_for_activity")
+        raise NotImplementedError("Subclass %s must implement badges_for_activity" % (self.id))
+
+    def image_for_badge(self, badge):
+        raise NotImplementedError("Subclass %s must implement image_for_badge" % (self.id))
 
 
 class SmashrunWrapper(ServiceWrapper):
@@ -313,7 +349,19 @@ class SmashrunWrapper(ServiceWrapper):
 
         return []
 
-    def download_activities(self, start, stop, activity_types=['run']):
+    def image_for_badge(self, badge):
+        url = badge['image']
+        dirname, filename = os.path.split(url)
+        size_dir = os.path.basename(dirname)
+        if size_dir == 'medium':
+            size_dir = 'full'
+        full_url = '/'.join([os.path.dirname(dirname), size_dir, filename])
+
+        logging.info("Downloading full size image for %s" % (badge['name']))
+        fname = download_url(url)
+        return fname
+
+    def download_activities(self, start, stop, badges, photos, routes, activity_types):
         activity_type_map = {'running': 'run'}
 
         logging.info("Retriving SmashRuns START: %s" % (start))
@@ -333,7 +381,7 @@ class SmashrunWrapper(ServiceWrapper):
                 elif btype in activity_types:
                     details = self.client.get_activity(r['activityId'])
                     logging.debug("SMASHRUN_ACTIVITY(%s)=%s" % (details['activityId'], pprint.pformat(details)))
-                    activities.append(SmashrunActivity(self, details, self.config['activity_title_fn']))
+                    activities.append(SmashrunActivity(self, self.config['activity_title_fn'], details))
                 else:
                     logging.info("Dropping activity type '%s' for ID=%s on %s'" % (atype, r['activityId'], start_time))
 
@@ -347,106 +395,54 @@ class SmashrunWrapper(ServiceWrapper):
         return result
 
 
-def sr_get_badge_photos(activity_id, badges):
-    photos = []
-    for badge in badges:
-        url = badge['image']
-        dirname, filename = os.path.split(url)
-        size_dir = os.path.basename(dirname)
-        if size_dir == 'medium':
-            size_dir = 'full'
-        full_url = '/'.join([os.path.dirname(dirname), size_dir, filename])
-
-        logging.info("Downloading full size image for %s" % (badge['name']))
-        request = requests.get(full_url)
-        tmpfile = tempfile.NamedTemporaryFile(prefix='dayonerun_%s_' % (activity_id), delete=False)
-        if request.status_code == 200:
-            tmpfile.write(request.content)
-            tmpfile.close()
-        else:
-            logging.warning("Unable to download badge %s at %s. Trying normal size image." % (badge['name'], full_url))
-            request = requests.get(url)
-            if request.status_code != 200:
-                logging.warning("Unable to download badge %s at %s" % (badge['name'], url))
-                os.unlink(tmpfile)
-                tmpfile = None
-            else:
-                tmpfile.write(request.content)
-                tmpfile.close()
-        if tmpfile is not None:
-            photos.append(tmpfile.name)
-
-    return photos
-
-
 class StravaWrapper(ServiceWrapper):
     def __init__(self, client, **kwargs):
         super(StravaWrapper, self).__init__(client, 'Strava', 'strava', **kwargs)
 
+    def download_activities(self, start, stop, badges, photos, routes, activity_types):
+        activity_type_map = {'running': 'run'}
 
-def st_get_photos(self, strava, activity_id):
-    # WORKAROUND until stravalib.get_activity_photos is fixed to include photo_sources
-    result_fetcher = functools.partial(strava.protocol.get,
-                                       '/activities/{id}/photos',
-                                       id=activity_id, photo_sources=True, size=self.config['strava_photo_size'])
+        logging.info("Retriving Strava Runs START: %s" % (start))
+        logging.info("                       STOP: %s" % (stop))
 
-    return stravalib.client.BatchedResultsIterator(entity=stravalib.model.ActivityPhoto,
-                                                   bind_client=strava,
-                                                   result_fetcher=result_fetcher)
+        activities = []
+        for activity in self.client.get_activities(after=start, before=stop):
+            details = self.client.protocol.get('/activities/{id}', id=activity.id, include_all_efforts=True)
+            activities.append(StravaActivity(self, self.config['activity_title_fn'], details))
 
+        # Store sorted oldest to newest
+        result = collections.OrderedDict()
+        for activity in activities: # sorted(activities, key=lambda x: sru.get_start_time(x.details)):
+            result[activity.id] = activity
 
-def st_get_runs(strava, start, stop):
-    logging.info("Retriving Strava Runs START: %s" % (start))
-    logging.info("                       STOP: %s" % (stop))
+        return result
 
-    activities = []
-    for activity in strava.get_activities(after=start, before=stop):
-        raw = strava.protocol.get('/activities/{id}', id=activity.id, include_all_efforts=True)
-        activities.append(raw)
-        logging.debug("STRAVA_ACTIVITY(%s)=%s" % (activity.id, pprint.pformat(raw)))
-    return activities
+    def url_for_activity(self, activity):
+        return 'https://www.strava.com/activities/%s' % (activity.id)
 
+    def photos_for_activity(self, activity):
+        logging.info("Getting any photos for %s" % (activity.id))
 
-def st_append_strava_info(strava, sr_run, st_runs, args, google_apikey=None, manual_matches={}):
-    st_run = None
-    # FIXME st_run = st_find_strava_run(sr_run, st_runs, manual_matches)
-    if st_run is None:
-        logging.warning("Found no Strava run corresponding to SmashRun activity %s" % (sr_run['__id']['smashrun']))
-        return
-    logging.info("Found Strava activity %s that matches SmashRun activity %s" % (st_run['id'], sr_run['__id']['smashrun']))
+        # WORKAROUND until stravalib.get_activity_photos is fixed to include photo_sources
+        result_fetcher = functools.partial(self.client.protocol.get,
+                                           '/activities/{id}/photos',
+                                           id=activity.id, photo_sources=True, size=self.config['strava_photo_size'])
 
-    sr_run['__id']['strava'] = st_run['id']
-    sr_run['__tags'].append('strava')
-    sr_run['__activity_urls']['strava'] = 'https://www.strava.com/activities/%s' % (st_run['id'])
+        photo_iterator = stravalib.client.BatchedResultsIterator(entity=stravalib.model.ActivityPhoto,
+                                                                 bind_client=self.client,
+                                                                 result_fetcher=result_fetcher)
 
-    # Add Strava route from polyline
-    if 'map' in st_run and 'polyline' in st_run['map']:
-        pline = st_run['map']['polyline']
-    if not args.no_route and google_apikey is not None and pline:
-        poly = urllib.quote(pline)
-        url = 'https://maps.googleapis.com/maps/api/staticmap?size=640x640&path=weight:6%%7Ccolor:blue%%7Cenc:%s&key=%s' % (poly, google_apikey)  # noqa
-        fname = download_url(url)
-        if fname is not None:
-            sr_run['__photos'].append(fname)
+        files = []
+        for photo in photo_iterator:
+            logging.debug("%s PHOTO: %s" % (self.id, pprint.pformat(photo)))
+            logging.debug("%s         ref : %s" % (self.id, photo.ref))
+            logging.debug("%s         urls: %s" % (self.id, pprint.pformat(photo.urls)))
+            fname = download_url(photo.urls[str(self.config['strava_photo_size'])])
+            if fname is not None:
+                files.append(fname)
+        return files
 
-    # Add any Strava photos
-    logging.info("Getting any photos for %s" % (st_run['id']))
-    self = None
-    for photo in st_get_photos(strava, st_run['id']):
-        logging.debug("PHOTO: %s" % pprint.pformat(photo))
-        logging.debug("        ref : %s" % (photo.ref))
-        logging.debug("        urls: %s" % (pprint.pformat(photo.urls)))
-        fname = download_url(photo.urls[str(self.config['strava_photo_size'])])
-        if fname is not None:
-            sr_run['__photos'].append(fname)
+    def badges_for_activity(self, activity):
+        # Strava doesn't have badges
+        return []
 
-
-def download_url(url):
-    r = requests.get(url)
-    if r.status_code == 200:
-        with tempfile.NamedTemporaryFile(prefix='dayonerun_strava_photo_', delete=False) as fh:
-            fh.write(r.content)
-            return fh.name
-    else:
-        logging.warning("Unable to download %s: %s" % (url, r.text))
-        return None
