@@ -110,6 +110,7 @@ class SmashrunActivity(ActivityWrapper):
         super(SmashrunActivity, self).__init__(service, title_fn, details)
         self._splits = None
         self._polyline = None
+        self._notables = None
 
     @property
     def id(self):
@@ -139,14 +140,18 @@ class SmashrunActivity(ActivityWrapper):
     def splits(self):
         if self._splits is None:
             self._splits = []
-            total_distance = 0 * UNITS.miles
             total_time = 0 * UNITS.seconds
+            prev_distance = 0 * UNITS.miles
             for split in self.service.client.get_splits(self.id):
-                cur_distance = split['distance'] * UNITS.miles
+                total_distance = split['distance'] * UNITS.miles
+                cur_distance = total_distance - prev_distance
+                prev_distance = total_distance
                 cur_speed = (split['speed'] * UNITS.miles) / (1.0 * UNITS.hour)
-                cur_time = 1.0 / (cur_speed / cur_distance)
+                print "CD: %s" % (cur_distance)
+                print "CS: %s" % (cur_speed)
+                cur_time = (1.0 / (cur_speed / (cur_distance))).to(UNITS.seconds)
+                print "CT: %s" % (cur_time)
                 total_time += cur_time
-                total_distance += cur_distance
                 self._splits.append({'total_distance': total_distance,
                                      'split_distance': cur_distance,
                                      'total_time': total_time,
@@ -161,59 +166,20 @@ class SmashrunActivity(ActivityWrapper):
             self._polyline = self.service.client.get_polyline(self.id)['polyline']
         return self._polyline
 
-    def __splits(self, split_interval=1.0 * UNITS.mile):
-        if self._splits is None:
-            distances = sru.get_records(self.details, 'distance')
-            if distances is None:
-                return None
-
-            clocks = sru.get_records(self.details, 'clock')
-            if clocks is None:
-                return None
-
-            splits = []
-            element_idx = 0
-            last_split = element_idx
-            next_split = split_interval
-            prev_time = 0 * UNITS.second
-            prev_distance = 0
-            for distance in distances:
-                distance = distance * UNITS.kilometer
-                if distance > next_split:
-                    cur_time = clocks[element_idx] * UNITS.second
-                    splits.append({'total_distance': next_split,
-                                   'split_distance': split_interval,
-                                   'total_time': cur_time,
-                                   'split_time': cur_time - prev_time
-                                   })
-                    prev_time = splits[-1]['total_time']
-                    prev_distance = splits[-1]['total_distance']
-                    next_split += split_interval
-                    last_split = element_idx
-
-                element_idx += 1
-
-            # Figure out last part of split
-            if (last_split + 1) < len(distances):
-                last_total_distance = (distances[-1] * UNITS.kilometer).to(UNITS.mile)
-                last_total_clock = clocks[-1] * UNITS.second
-                splits.append({'total_distance': last_total_distance,
-                               'split_distance': last_total_distance - prev_distance,
-                               'total_time': last_total_clock,
-                               'split_time': last_total_clock - prev_time})
-
-            for split in splits:
-                split['split_pace'] = split['split_time'] / split['split_distance']
-                split['total_pace'] = split['total_time'] / split['total_distance']
-
-            self._splits = splits
-
-        return self._splits
+    @property
+    def notables(self):
+        if self._notables is None:
+            self._notables = []
+            for noteable in self.service.client.get_notables(self.id):
+                self._notables.append(noteable['description'].capitalize())
+        return self._notables
+    
 
 
 class StravaActivity(ActivityWrapper):
     def __init__(self, service, title_fn, details):
         super(StravaActivity, self).__init__(service, title_fn, details)
+        self._notables = None
 
     @property
     def id(self):
@@ -266,6 +232,11 @@ class StravaActivity(ActivityWrapper):
                            })
         return splits
 
+    @property
+    def notables(self):
+        if self._notables is None:
+            self._notables = []
+        return self._notables
 
 class ServiceWrapper(object):
     def __init__(self, client, name, service_id, google_apikey=None, config=None):
