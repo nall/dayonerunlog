@@ -8,7 +8,7 @@ import polyline
 import pprint
 import requests
 import os
-import smashrun.utils as sru
+import smashrun_utils.utils as sru
 import stravalib
 import tempfile
 import urllib
@@ -109,6 +109,7 @@ class SmashrunActivity(ActivityWrapper):
     def __init__(self, service, title_fn, details):
         super(SmashrunActivity, self).__init__(service, title_fn, details)
         self._splits = None
+        self._polyline = None
 
     @property
     def id(self):
@@ -136,11 +137,29 @@ class SmashrunActivity(ActivityWrapper):
 
     @property
     def splits(self):
-        return self.__splits()
+        if self._splits is None:
+            self._splits = []
+            total_distance = 0 * UNITS.miles
+            total_time = 0 * UNITS.seconds
+            for split in self.service.client.get_splits(self.id):
+                cur_distance = split['distance'] * UNITS.miles
+                cur_speed = (split['speed'] * UNITS.miles) / (1.0 * UNITS.hour)
+                cur_time = 1.0 / (cur_speed / cur_distance)
+                total_time += cur_time
+                total_distance += cur_distance
+                self._splits.append({'total_distance': total_distance,
+                                     'split_distance': cur_distance,
+                                     'total_time': total_time,
+                                     'split_time': cur_time,
+                                     'split_pace': cur_time / cur_distance,
+                                     'total_pace': total_time / total_distance})
+        return self._splits
 
     @property
     def polyline(self):
-        return polyline.encode(sru.get_coordinates(self.details))
+        if self._polyline is None:
+            self._polyline = self.service.client.get_polyline(self.id)['polyline']
+        return self._polyline
 
     def __splits(self, split_interval=1.0 * UNITS.mile):
         if self._splits is None:
@@ -405,7 +424,7 @@ class SmashrunWrapper(ServiceWrapper):
 
         # FIXME: Look at briefs first to filter on stop once smashrun-client supports it
         activities = []
-        for r in self.client.get_activities(since=start):
+        for r in self.client.get_activities(since=start, style='extended'):
             start_time = sru.get_start_time(r)
             if start_time > stop:
                 logging.debug("Dropping activity on %s after stop date %s" % (start_time, stop))
@@ -415,9 +434,7 @@ class SmashrunWrapper(ServiceWrapper):
                 if btype is None:
                     logging.warning("Found unknown smashrun activity '%s'. Ignoring" % (atype))
                 elif btype in activity_types:
-                    details = self.client.get_activity(r['activityId'])
-                    logging.debug("SMASHRUN_ACTIVITY(%s)=%s" % (details['activityId'], pprint.pformat(details)))
-                    activities.append(SmashrunActivity(self, self.config['activity_title_fn'], details))
+                    activities.append(SmashrunActivity(self, self.config['activity_title_fn'], r))
                 else:
                     logging.info("Dropping activity type '%s' for ID=%s on %s'" % (atype, r['activityId'], start_time))
 

@@ -34,6 +34,7 @@
 # FIXME: Remove this path hack
 import sys
 sys.path.insert(0, '/Users/nall/Code/smashrun-utils')
+sys.path.insert(0, '/Users/nall/Code/smashrun-client')
 
 import argparse
 import collections
@@ -48,7 +49,7 @@ from datetime import date
 from datetime import datetime
 from wrappers import smashrun_client, SmashrunWrapper, strava_client, StravaWrapper
 
-import smashrun.utils as sru
+import smashrun_utils.utils as sru
 
 
 def custom_title(run):
