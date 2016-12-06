@@ -72,25 +72,32 @@ class ActivityWrapper(object):
         self.linked_activities = []
         self._badges = []
         self._photos = []
+        self._notables = []
         self._tags = [self.service.id]
 
     def all_badges(self):
-        badges = copy.deepcopy(self._badges)
+        badges = [(self.service, copy.copy(x)) for x in self._badges]
         for a in self.linked_activities:
             badges.extend(a.badges)
         return badges
 
     def all_photos(self):
-        photos = copy.deepcopy(self._photos)
+        photos = [(self.service, x) for x in self._photos]
         for a in self.linked_activities:
             photos.extend(a.photos)
         return photos
 
     def all_tags(self):
-        tags = copy.deepcopy(self._tags)
+        tags = [(self.service, x) for x in self._tags]
         for a in self.linked_activities:
             tags.extend(a.tags)
         return tags
+
+    def all_notables(self):
+        notables = [(self.service, x) for x in self._notables]
+        for a in self.linked_activities:
+            notables.extend(a.notables)
+        return notables
 
     @property
     def tags(self):
@@ -103,6 +110,10 @@ class ActivityWrapper(object):
     @property
     def photos(self):
         return self.all_photos()
+
+    @property
+    def notables(self):
+        return self.all_notables()
 
 
 class SmashrunActivity(ActivityWrapper):
@@ -147,10 +158,7 @@ class SmashrunActivity(ActivityWrapper):
                 cur_distance = total_distance - prev_distance
                 prev_distance = total_distance
                 cur_speed = (split['speed'] * UNITS.miles) / (1.0 * UNITS.hour)
-                print "CD: %s" % (cur_distance)
-                print "CS: %s" % (cur_speed)
                 cur_time = (1.0 / (cur_speed / (cur_distance))).to(UNITS.seconds)
-                print "CT: %s" % (cur_time)
                 total_time += cur_time
                 self._splits.append({'total_distance': total_distance,
                                      'split_distance': cur_distance,
@@ -172,7 +180,8 @@ class SmashrunActivity(ActivityWrapper):
             self._notables = []
             for noteable in self.service.client.get_notables(self.id):
                 self._notables.append(noteable['description'].capitalize())
-        return self._notables
+
+        return self.all_notables()
     
 
 
@@ -234,9 +243,45 @@ class StravaActivity(ActivityWrapper):
 
     @property
     def notables(self):
+        def text_for_achievement(a, name, key):
+            rank = a['rank']
+            if rank == 1:
+                place = 'Fastest'
+            elif rank == 2:
+                place = '2nd fastest'
+            elif rank == 3:
+                place = '3rd fastest'
+            else:
+                place = '%sth fastest' % (rank)
+
+            value = None
+            if key == 'best_efforts':
+                if a['type'] == 'pr':
+                    value = 'PR: %s %s' % (place, name)
+                elif a['type'] == 'overall':
+                    value = '%s %s among all Strava althletes' % (place, name)
+                elif a['type'] == 'year_overall':
+                    value = '%s %s among all Strava althletes in %s' % (place, name, self.start.year)
+            elif key == 'segment_efforts':
+                if a['type'] == 'pr':
+                    value = '[%s] PR: %s' % (name, place)
+                elif a['type'] == 'overall':
+                    value = '[%s] %s among all Strava althletes' % (name, place)
+                elif a['type'] == 'year_overall':
+                    value = '[%s] %s among all Strava althletes in %s' % (name, place, self.start.year)
+
+            return value
+
         if self._notables is None:
             self._notables = []
-        return self._notables
+            for key in ['best_efforts', 'segment_efforts']:
+                for effort in self.details[key]:
+                    for achievement in effort['achievements']:
+                        value = text_for_achievement(achievement, effort['name'], key)
+                        if value is not None:
+                            self._notables.append(value)
+
+        return self.all_notables()
 
 class ServiceWrapper(object):
     def __init__(self, client, name, service_id, google_apikey=None, config=None):
@@ -253,7 +298,7 @@ class ServiceWrapper(object):
 
     def cleanup(self):
         for activity in self.activities.values():
-            for photo in activity.photos:
+            for service, photo in activity.photos:
                 logging.info("Deleting %s:%s temp photo %s" % (self.name, activity.id, photo))
                 os.unlink(photo)
 

@@ -222,7 +222,7 @@ def create_journal_entry(args, activity):
     dayone_args.extend(['--date', activity.start.strftime('%Y-%m-%d %H:%M:%S')])
 
     # Our tag + run-specific tags + command line tags
-    dayone_args.extend(['--tags', 'dayonerun'] + activity.tags + args.tags)
+    dayone_args.extend(['--tags', 'dayonerun'] + [t[1] for t in activity.tags] + args.tags)
 
     coordinates = activity.start_coordinates
     if not args.no_coordinates and coordinates is not None:
@@ -230,7 +230,7 @@ def create_journal_entry(args, activity):
 
     if len(activity.photos) > 0:
         dayone_args.append('--photos')
-        dayone_args.extend(activity.photos)
+        dayone_args.extend([x[1] for x in activity.photos])  # Ignore [0] which is the service
 
     dayone_args.append('--')
     dayone_args.append('new')
@@ -248,14 +248,40 @@ def create_journal_entry(args, activity):
 
     if len(activity.badges) > 0:
         entry_text += '# Badges\n'
-        for badge in activity.badges:
-            entry_text += '   * **%s**: %s\n' % (badge['name'], badge['requirement'])
+        services = set()
+        for service, badge in activity.badges:
+            services.add(service)
+
+        badge_prefix = ''
+        if len(services) > 1:
+            badge_prefix = ' ' * 3
+
+        cur_service = None
+        for service, badge in activity.badges:
+            if len(services) > 1:
+                if cur_service != service:
+                    entry_text += '   * %s\n' % (service.name)
+                    cur_service = service
+            entry_text += '%s   * **%s**: %s\n' % (badge_prefix, badge['name'], badge['requirement'])
         entry_text += '\n'
 
     if len(activity.notables) > 0:
         entry_text += '# Trivia\n'
-        for n in activity.notables:
-            entry_text += '   * %s\n' % (n)
+        services = set()
+        for service, notable in activity.notables:
+            services.add(service)
+
+        notable_prefix = ''
+        if len(services) > 1:
+            notable_prefix = ' ' * 3
+
+        cur_service = None
+        for service, notable in activity.notables:
+            if len(services) > 1:
+                if cur_service != service:
+                    entry_text += '   * %s\n' % (service.name)
+                    cur_service = service
+            entry_text += '%s   * %s\n' % (notable_prefix, notable)
         entry_text += '\n'
 
     entry_text += '# Splits\n%s\n' % split_markdown
